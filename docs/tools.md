@@ -13,6 +13,7 @@ Query and inspect device event timelines using data already collected in DynamoD
 - Chronological event display
 - Time-range filtering
 - Raw event inspection from S3
+- **Analytics summary mode** (event patterns, gaps, bursts, anomalies)
 - Works with current Phase 1 schema
 
 **Does NOT:**
@@ -77,14 +78,103 @@ npm run timeline -- \
 ```bash
 # Check synthetic test event
 npm run timeline -- --deviceId test-device --hours 1 --show-raw
-
-# Verify production device behavior
-npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 2
+ with summary
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 2 --summary
 ```
 
 **When to use:**
 - After Lambda deployment
 - After infrastructure changes
+- Smoke testing
+
+#### 5. Get Analytics Summary
+
+```bash
+npm rAnalytics Summary (with --summary flag)
+
+```
+================================================================
+  Device Timeline
+==================================================================
+
+Device ID:     e00fce6841443bcc0f3178e4
+Total Events:  36
+First Event:   2026-06-27T10:00:55.496Z
+Last Event:    2026-06-28T02:00:11.974Z
+Time Span:     16 hours
+
+--- INGEST PERFORMANCE ---
+Average Delay: 365ms
+Min Delay:     97ms
+Max Delay:     755ms
+
+--- EVENT COUNTS ---
+Ubidots-Sensor-Hook-v1         36
+
+--- FIRMWARE VERSIONS ---
+  14
+
+--- TIME GAPS ---
+No significant gaps detected
+
+--- EVENT BURSTS (3+ events within 10 min) ---
+  3 events from 2026-06-27T13:15:20.695Z to 2026-06-27T13:23:13.251Z
+    Events: Ubidots-Sensor-Hook-v1(3)
+
+--- ANOMALIES ---
+No anomalies detected
+
+================================================================
+```
+
+**Key metrics explained:**
+
+- **Total Events**: Number of events in query window
+- **Time Span**: Duration from first to last event
+- **Ingest Performance**: Latency between device event time and ingestion (receivedAt - eventTime)
+  - Average is typical latency
+  - High max values may indicate network issues
+- **Event Counts**: Breakdown by event name, sorted by frequency
+- **Firmware Versions**: All firmware versions seen
+- **Time Gaps**: Periods with no events exceeding threshold
+  - Useful for detecting device offline periods
+  - Default threshold: 90 minutes
+- **Event Bursts**: Clusters of 3+ events within 10 minutes
+  - May indicate device reconnection/retry behavior
+  - May indicate unusual activity
+- **Anomalies**: Detected issues
+  - Missing eventTime
+  - High ingest delay (> 5 seconds and > 2x average)
+  - Repeated burst patterns
+
+#### un timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --summary
+```
+
+**When to use:**
+- Quick health check with metrics
+- Identify patterns and anomalies
+- Detect reporting gaps or bursts
+- Performance analysis
+- Pre/post-deployment comparison
+
+**Summary includes:**
+- Event count by event name
+- First/last event time and time span
+- Ingest performance (average/min/max delay)
+- Time gaps larger than threshold (default 90 min)
+- Event bursts (3+ events within 10 minutes)
+- Firmware versions seen
+- Serial lifecycle event counts (if present)
+- Detected anomalies
+
+**Custom gap threshold:**
+```bash
+npm run timeline -- \
+  --deviceId e00fce68e4fa8ab3f8faa207 \
+  --hours 24 \
+  --summary \
+  --gap-threshold 30
+```ructure changes
 - Smoke testing
 
 ### Output Interpretation

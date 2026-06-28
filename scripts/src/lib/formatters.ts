@@ -4,6 +4,7 @@
  */
 
 import { DynamoIndexRecord, S3StorageRecord } from '../types';
+import { TimelineSummary } from './analytics';
 
 /**
  * Format timeline event for console display
@@ -112,5 +113,122 @@ export function formatError(message: string, error?: Error): string {
     }
   }
   lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * Format timeline summary
+ */
+export function formatTimelineSummary(summary: TimelineSummary, deviceId: string): string {
+  const lines: string[] = [];
+  
+  lines.push('\n================================================================');
+  lines.push('  TIMELINE SUMMARY');
+  lines.push('================================================================');
+  lines.push('');
+  lines.push('Device ID:     ' + deviceId);
+  lines.push('Total Events:  ' + summary.totalEvents);
+  
+  if (summary.firstEventTime && summary.lastEventTime) {
+    lines.push('First Event:   ' + summary.firstEventTime);
+    lines.push('Last Event:    ' + summary.lastEventTime);
+    
+    const durationMs = new Date(summary.lastEventTime).getTime() - new Date(summary.firstEventTime).getTime();
+    const durationHours = Math.round(durationMs / (1000 * 60 * 60) * 10) / 10;
+    lines.push('Time Span:     ' + durationHours + ' hours');
+  }
+  
+  lines.push('');
+  lines.push('--- INGEST PERFORMANCE ---');
+  lines.push('Average Delay: ' + summary.averageIngestDelayMs + 'ms');
+  lines.push('Min Delay:     ' + summary.minIngestDelayMs + 'ms');
+  lines.push('Max Delay:     ' + summary.maxIngestDelayMs + 'ms');
+  
+  // Event counts
+  lines.push('');
+  lines.push('--- EVENT COUNTS ---');
+  const sortedEvents = Object.entries(summary.eventCounts)
+    .sort((a, b) => b[1] - a[1]);
+  
+  for (const [eventName, count] of sortedEvents) {
+    lines.push(eventName.padEnd(30) + ' ' + count);
+  }
+  
+  // Firmware versions
+  if (summary.firmwareVersions.length > 0) {
+    lines.push('');
+    lines.push('--- FIRMWARE VERSIONS ---');
+    for (const version of summary.firmwareVersions) {
+      lines.push('  ' + version);
+    }
+  }
+  
+  // Serial lifecycle counts
+  const hasSerialEvents = 
+    summary.serialLifecycleCounts.SERIAL_CONNECTED > 0 ||
+    summary.serialLifecycleCounts.SERIAL_DISCONNECTED > 0 ||
+    summary.serialLifecycleCounts.SERIAL_MISSING > 0 ||
+    summary.serialLifecycleCounts.LOG > 0;
+  
+  if (hasSerialEvents) {
+    lines.push('');
+    lines.push('--- SERIAL LIFECYCLE ---');
+    lines.push('SERIAL_CONNECTED:      ' + summary.serialLifecycleCounts.SERIAL_CONNECTED);
+    lines.push('SERIAL_DISCONNECTED:   ' + summary.serialLifecycleCounts.SERIAL_DISCONNECTED);
+    lines.push('SERIAL_MISSING:        ' + summary.serialLifecycleCounts.SERIAL_MISSING);
+    lines.push('LOG:                   ' + summary.serialLifecycleCounts.LOG);
+  }
+  
+  // Time gaps
+  if (summary.gaps.length > 0) {
+    lines.push('');
+    lines.push('--- TIME GAPS (> threshold) ---');
+    for (const gap of summary.gaps) {
+      lines.push(`  ${gap.durationMinutes} minutes gap`);
+      lines.push(`    From: ${gap.startTime} (${gap.eventBefore})`);
+      lines.push(`    To:   ${gap.endTime} (${gap.eventAfter})`);
+      lines.push('');
+    }
+  } else {
+    lines.push('');
+    lines.push('--- TIME GAPS ---');
+    lines.push('No significant gaps detected');
+  }
+  
+  // Bursts
+  if (summary.bursts.length > 0) {
+    lines.push('');
+    lines.push('--- EVENT BURSTS (3+ events within 10 min) ---');
+    for (const burst of summary.bursts) {
+      lines.push(`  ${burst.eventCount} events from ${burst.startTime} to ${burst.endTime}`);
+      const eventSummary = Object.entries(
+        burst.events.reduce((acc, e) => {
+          acc[e] = (acc[e] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>)
+      ).map(([name, count]) => `${name}(${count})`).join(', ');
+      lines.push(`    Events: ${eventSummary}`);
+      lines.push('');
+    }
+  }
+  
+  // Anomalies
+  if (summary.anomalies.length > 0) {
+    lines.push('');
+    lines.push('--- ANOMALIES ---');
+    for (const anomaly of summary.anomalies) {
+      const severityLabel = `[${anomaly.severity.toUpperCase()}]`;
+      lines.push(`  ${severityLabel.padEnd(10)} ${anomaly.description}`);
+    }
+  } else {
+    lines.push('');
+    lines.push('--- ANOMALIES ---');
+    lines.push('No anomalies detected');
+  }
+  
+  lines.push('');
+  lines.push('================================================================');
+  lines.push('');
+  
   return lines.join('\n');
 }

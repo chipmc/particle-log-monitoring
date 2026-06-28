@@ -20,7 +20,8 @@
 import { Command } from 'commander';
 import { queryDeviceTimeline, hoursAgo } from './lib/dynamo-query';
 import { fetchRawEvent } from './lib/s3-fetch';
-import { formatTimelineHeader, formatTimelineEvent, formatRawEvent, formatError } from './lib/formatters';
+import { formatTimelineHeader, formatTimelineEvent, formatRawEvent, formatError, formatTimelineSummary } from './lib/formatters';
+import { analyzeTimeline } from './lib/analytics';
 
 const program = new Command();
 
@@ -33,6 +34,8 @@ program
   .option('-s, --start <ISO8601>', 'Start time (ISO 8601 format)')
   .option('-e, --end <ISO8601>', 'End time (ISO 8601 format)')
   .option('-l, --limit <number>', 'Maximum number of events to return', '100')
+  .option('--summary', 'Show analytics summary before detailed timeline')
+  .option('--gap-threshold <minutes>', 'Time gap threshold in minutes for gap detection', '90')
   .option('-r, --show-raw [index]', 'Show raw S3 event data (optionally specify event index, default: all)')
   .option('-p, --profile <profile>', 'AWS profile to use', 'particle-admin')
   .option('-t, --table <tableName>', 'DynamoDB table name (defaults to CloudFormation output)')
@@ -122,6 +125,13 @@ async function main() {
       },
       options.profile
     );
+    
+    // Generate and display summary if requested
+    if (options.summary) {
+      const gapThreshold = parseInt(options.gapThreshold, 10);
+      const summary = analyzeTimeline(events, gapThreshold);
+      console.log(formatTimelineSummary(summary, options.deviceId));
+    }
     
     // Display timeline header
     console.log(formatTimelineHeader(options.deviceId, events.length, startTime, endTime));

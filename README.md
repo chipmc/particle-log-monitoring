@@ -121,12 +121,16 @@ npm run timeline -- --deviceId <deviceId> --hours 24
 - Time-range filtering (hours, start/end)
 - Display chronological events
 - Fetch raw S3 event data
+- **Analytics summary mode** (gaps, bursts, anomalies, performance)
 - Read-only (no AWS modification)
 
 **Quick examples:**
 ```bash
 # Last 24 hours
 npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24
+
+# With analytics summary
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --summary
 
 # Specific time range
 npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 \

@@ -45,6 +45,16 @@ npm run timeline -- \
 npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --limit 50
 ```
 
+**Show analytics summary:**
+```bash
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --summary
+```
+
+**Custom gap threshold:**
+```bash
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --summary --gap-threshold 30
+```
+
 **Show raw S3 event data:**
 ```bash
 # Show raw data for all events
@@ -77,6 +87,8 @@ npm run timeline -- \
 | `-e, --end <ISO8601>` | End time (ISO 8601) | - |
 | `-l, --limit <number>` | Max events to return | `100` |
 | `-r, --show-raw [index]` | Show raw S3 data (all or specific) | - |
+| `--summary` | Show analytics summary before timeline | - |
+| `--gap-threshold <minutes>` | Time gap threshold for detection | `90` |
 | `-p, --profile <profile>` | AWS profile | `particle-admin` |
 | `-t, --table <name>` | DynamoDB table name | Auto-detect |
 | `-b, --bucket <name>` | S3 bucket name | Auto-detect |
@@ -96,6 +108,16 @@ The tool displays plain text output (no terminal colors):
 - S3 key reference
 
 With `--show-raw`, it also displays the complete raw webhook payload and parsed data from S3.
+
+**Summary Analytics** (with `--summary` flag):
+- Event count by event name
+- First/last event time and time span
+- Ingest performance (avg/min/max delay)
+- Time gaps larger than threshold (default 90 minutes)
+- Event bursts (3+ events within 10 minutes)
+- Firmware versions seen
+- Serial lifecycle event counts (if present)
+- Detected anomalies
 
 #### Examples
 
@@ -122,11 +144,11 @@ npm run timeline -- \
 
 **Verify deployment:**
 ```bash
-# Check recent events after deployment
+# Check recent events after deployment with summary
 npm run timeline -- \
   --deviceId e00fce68e4fa8ab3f8faa207 \
   --hours 1 \
-  --show-raw
+  --summary
 ```
 
 ## Testing
