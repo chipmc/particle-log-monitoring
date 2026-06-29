@@ -14,6 +14,7 @@ Query and inspect device event timelines using data already collected in DynamoD
 - Time-range filtering
 - Raw event inspection from S3
 - **Analytics summary mode** (event patterns, gaps, bursts, anomalies)
+- **Health diagnostics mode** (payload-aware device health analysis)
 - Works with current Phase 1 schema
 
 **Does NOT:**
@@ -174,8 +175,84 @@ npm run timeline -- \
   --hours 24 \
   --summary \
   --gap-threshold 30
-```ructure changes
-- Smoke testing
+```
+
+#### 6. Get Device Health Diagnostics
+
+```bash
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --health
+```
+
+**When to use:**
+- Device health assessment
+- Battery monitoring
+- Connection quality check
+- Reset count tracking
+- Temperature monitoring
+- Alert detection
+- Firmware version validation
+
+**Health diagnostics includes:**
+- Battery: latest, min, max, average, change over window
+- Connection time: latest, min, max, average (detects high connection times)
+- Reset count: latest, change (detects increasing resets)
+- Alert count: latest, non-zero detection
+- Temperature: latest, min, max, average, change
+- Occupancy metrics: current and daily counts
+- Firmware versions and changes during window
+- Anomaly detection:
+  - Battery < 30% (medium severity)
+  - Battery < 20% (high severity)
+  - Connection time > 180s (medium/high severity)
+  - Reset count increasing (medium/high severity)
+  - Active alerts detected (high severity)
+  - Firmware version changes (low severity)
+  - Rapid battery drain > 30% (medium severity)
+
+**Note:** Health mode fetches all S3 payloads to parse device telemetry data. This is more intensive than summary mode but provides detailed device health insights.
+
+#### 7. Event Correlation Analysis
+
+```bash
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --correlate
+```
+
+**When to use:**
+- Identify root causes of device issues
+- Investigate connectivity problems
+- Analyze reboot patterns
+- Detect causal relationships between events
+- Debug intermittent failures
+- Pattern detection across event types
+
+**Correlation analysis includes:**
+- Groups events into configurable time windows (default 5 minutes)
+- Correlates telemetry, watchdog, status, serial lifecycle, and serial logs
+- Extracts and displays:
+  - Telemetry: battery, connection time, temperature, resets, alerts, occupancy
+  - Watchdog events with reset causes
+  - Status data: cloud recovery stage, network state, queue depth
+  - Serial lifecycle: connect/disconnect/missing events
+  - Serial logs: categorized by modem, network, power, error, reconnect
+- Applies 8 heuristic inference rules:
+  1. Connectivity degradation (high connection time + modem errors)
+  2. USB instability (repeated serial connect/disconnect)
+  3. Network stall causing watchdog
+  4. Device reboot (reset count increase + watchdog)
+  5. Power anomaly (low battery + alerts)
+  6. Reconnect loop (multiple reconnect attempts)
+  7. High connection time (> 180s)
+  8. Critical battery (< 20%)
+- Shows summary with total inferences, severity counts, top categories
+- Each inference includes severity (CRITICAL/WARNING/INFO), category, message, evidence
+
+**Custom window size:**
+```bash
+# Use 10-minute windows for broader pattern detection
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 48 --correlate --window 10
+```
+
+**Note:** Correlation mode fetches all S3 payloads to analyze event relationships. It is the most comprehensive diagnostic mode, providing causal analysis beyond simple metrics.
 
 ### Output Interpretation
 
@@ -256,6 +333,179 @@ Parsed Data:
   }
 }
 ```
+
+#### Health Diagnostics (with --health flag)
+
+Parses Particle webhook payloads to extract device health metrics:
+
+```
+================================================================
+  DEVICE HEALTH SUMMARY
+================================================================
+
+Device ID:     e00fce6841443bcc0f3178e4
+Total Events:  20
+First Event:   2026-06-27T10:00:55.496Z
+Last Event:    2026-06-27T14:11:20.932Z
+Time Span:     4.2 hours
+
+--- HEALTH METRICS ---
+
+Battery:
+  Latest:  91.80 %
+  Min:     91.49 %
+  Max:     91.80 %
+  Average: 91.62 %
+  Change:  +0.15 % (over 20 readings)
+
+Connection Time:
+  Latest:  1.00 s
+  Min:     1.00 s
+  Max:     33.00 s
+  Average: 3.15 s
+  Change:  0.00 s (over 20 readings)
+
+Temperature:
+  Latest:  38.08 °C
+  Min:     25.11 °C
+  Max:     38.08 °C
+  Average: 30.98 °C
+  Change:  +10.48 °C (over 20 readings)
+
+--- FIRMWARE VERSIONS ---
+  14
+
+--- ANOMALIES DETECTED ---
+
+MEDIUM SEVERITY:
+  [TEMPERATURE] Temperature increased significantly: +10.48°C
+
+================================================================
+```
+
+**Key health metrics explained:**
+
+- **Battery**: Percentage charge level
+  - Monitor for low battery (< 30%)
+  - Watch for rapid drain (> 30% drop)
+  - Change shows trend over time window
+- **Connection Time**: Seconds to establish cellular connection
+  - Normal: 1-30s
+  - Warning: > 60s
+  - Critical: > 180s
+  - High values indicate network issues
+- **Reset Count**: Cumulative device reset counter
+  - Should remain stable
+  - Increases indicate crashes or watchdog resets
+  - Track changes to identify instability
+- **Alert Count**: Active device alerts
+  - Should be 0 under normal operation
+  - Non-zero indicates device-reported issues
+- **Temperature**: Device temperature in °C
+  - Monitor for extreme values
+  - Sudden changes may indicate environmental issues
+- **Occupancy**: Current occupancy count (for counter devices)
+- **Daily Occupancy**: Daily cumulative count
+
+**Anomaly severity levels:**
+- **HIGH**: Immediate attention needed (low battery < 20%, active alerts, high resets)
+- **MEDIUM**: Monitor closely (battery < 30%, connection issues, reset increases)
+- **LOW**: Informational (firmware changes, minor variations)
+
+**Payload field mapping:**
+- Extracts from Particle webhook `data` JSON string
+- Supports HTML-encoded JSON (from Particle webhooks)
+- Falls back to top-level particle fields
+- Handles both `temp` and `temperature` field names
+
+#### Event Correlation (with --correlate flag)
+
+Groups events into time windows and applies inference rules to detect patterns:
+
+```
+================================================================
+  EVENT CORRELATION ANALYSIS
+================================================================
+
+Device ID:       e00fce6841443bcc0f3178e4
+Time Range:      2026-06-27T10:00:55.496Z to 2026-06-27T14:11:20.932Z
+Window Duration: 5 minutes
+Window Count:    17
+
+--- SUMMARY ---
+Total Inferences: 3
+  Critical:       1
+  Warning:        2
+  Info:           0
+
+Top Categories:
+  connectivity: 2
+  power: 1
+
+================================================================
+
+Window 8
+----------------------------------------------------------------
+Time Range: 2026-06-27T12:15:00.000Z to 2026-06-27T12:20:00.000Z
+Duration:   5 minutes
+Events:     4
+
+TELEMETRY:
+  - Ubidots-Sensor-Hook-v1: battery=25.3%, connecttime=195s, temp=28.1°C, resets=5, alerts=2, occupancy=1
+
+WATCHDOG:
+  - watchdog: network timeout
+
+STATUS:
+  - status: cloudRecoverStage=2, networkState=disconnected
+
+SERIAL LOGS:
+  - [modem] MODEM ERROR: cellular connection failed
+  - [network] Network registration timeout
+
+INFERENCES:
+  🔴 CRITICAL | connectivity | Network stall causing watchdog
+    Evidence: Watchdog reset with high connection time (195s) and network errors
+  
+  🔴 CRITICAL | power | Power anomaly detected
+    Evidence: Low battery (25.3%) with 2 active alerts
+  
+  ⚠️  WARNING | connectivity | Connectivity degradation
+    Evidence: High connection time (195s) with modem errors in window
+
+================================================================
+```
+
+**Key correlation features:**
+
+- **Time Windows**: Events grouped by proximity (default 5 minutes, configurable)
+- **Multi-Event Correlation**: Analyzes relationships between:
+  - Telemetry (battery, connection time, resets, alerts, temperature)
+  - Watchdog events (reset causes)
+  - Status events (cloud recovery, network state)
+  - Serial lifecycle (USB connect/disconnect)
+  - Serial logs (modem, network, power errors)
+- **Inference Rules**: 8 heuristic patterns detect:
+  - Connectivity issues (high connect time, modem errors, reconnect loops)
+  - Hardware problems (USB instability, watchdog resets)
+  - Power anomalies (low battery with alerts)
+  - Device reboots (reset count increases)
+- **Evidence-Based**: Each inference shows supporting data
+- **Severity Levels**:
+  - 🔴 **CRITICAL**: Immediate action needed (watchdog, low battery + alerts)
+  - ⚠️  **WARNING**: Monitor closely (high connect time, USB flapping, reconnect loops)
+  - ℹ️  **INFO**: Informational (minor anomalies)
+
+**Inference categories:**
+- **connectivity**: Network and cellular issues
+- **power**: Battery and power-related problems
+- **stability**: Crashes, resets, watchdog events
+- **hardware**: USB, serial, and physical device issues
+
+**Window duration:**
+- Smaller windows (2-5 min): Detect rapid event sequences
+- Larger windows (10-30 min): Identify broader patterns
+- Adjust with `--window <minutes>` based on investigation needs
 
 ### Troubleshooting
 

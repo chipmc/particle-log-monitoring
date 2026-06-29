@@ -5,6 +5,8 @@
 
 import { DynamoIndexRecord, S3StorageRecord } from '../types';
 import { TimelineSummary } from './analytics';
+import { HealthSummary, MetricStats } from './health';
+import { CorrelationAnalysis, CorrelationWindow } from './correlation';
 
 /**
  * Format timeline event for console display
@@ -227,6 +229,343 @@ export function formatTimelineSummary(summary: TimelineSummary, deviceId: string
   }
   
   lines.push('');
+  lines.push('================================================================');
+  lines.push('');
+  
+  return lines.join('\n');
+}
+
+/**
+ * Format metric statistics for health summary
+ */
+function formatMetricStats(label: string, stats: MetricStats, unit: string = ''): string {
+  const lines: string[] = [];
+  const unitStr = unit ? ` ${unit}` : '';
+  
+  lines.push(`${label}:`);
+  lines.push(`  Latest:  ${stats.latest.toFixed(2)}${unitStr}`);
+  lines.push(`  Min:     ${stats.min.toFixed(2)}${unitStr}`);
+  lines.push(`  Max:     ${stats.max.toFixed(2)}${unitStr}`);
+  lines.push(`  Average: ${stats.average.toFixed(2)}${unitStr}`);
+  
+  if (stats.change !== undefined) {
+    const changeStr = stats.change > 0 ? `+${stats.change.toFixed(2)}` : stats.change.toFixed(2);
+    lines.push(`  Change:  ${changeStr}${unitStr} (over ${stats.count} readings)`);
+  } else {
+    lines.push(`  Readings: ${stats.count}`);
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Format health summary
+ */
+export function formatHealthSummary(health: HealthSummary): string {
+  const lines: string[] = [];
+  
+  lines.push('\n================================================================');
+  lines.push('  DEVICE HEALTH SUMMARY');
+  lines.push('================================================================');
+  lines.push('');
+  lines.push('Device ID:     ' + health.deviceId);
+  lines.push('Total Events:  ' + health.eventCount);
+  
+  if (health.timeSpan.first && health.timeSpan.last) {
+    lines.push('First Event:   ' + health.timeSpan.first);
+    lines.push('Last Event:    ' + health.timeSpan.last);
+    lines.push('Time Span:     ' + health.timeSpan.hours + ' hours');
+  }
+  
+  // Health metrics
+  lines.push('');
+  lines.push('--- HEALTH METRICS ---');
+  lines.push('');
+  
+  if (health.metrics.battery) {
+    lines.push(formatMetricStats('Battery', health.metrics.battery, '%'));
+    lines.push('');
+  }
+  
+  if (health.metrics.connecttime) {
+    lines.push(formatMetricStats('Connection Time', health.metrics.connecttime, 's'));
+    lines.push('');
+  }
+  
+  if (health.metrics.resets) {
+    lines.push(formatMetricStats('Reset Count', health.metrics.resets));
+    lines.push('');
+  }
+  
+  if (health.metrics.alerts) {
+    lines.push(formatMetricStats('Alert Count', health.metrics.alerts));
+    lines.push('');
+  }
+  
+  if (health.metrics.temperature) {
+    lines.push(formatMetricStats('Temperature', health.metrics.temperature, '°C'));
+    lines.push('');
+  }
+  
+  if (health.metrics.occupancy) {
+    lines.push(formatMetricStats('Occupancy', health.metrics.occupancy));
+    lines.push('');
+  }
+  
+  if (health.metrics.dailyoccupancy) {
+    lines.push(formatMetricStats('Daily Occupancy', health.metrics.dailyoccupancy));
+    lines.push('');
+  }
+  
+  // Check if we have any metrics at all
+  const hasMetrics = Object.keys(health.metrics).length > 0;
+  if (!hasMetrics) {
+    lines.push('No parseable health metrics found in payloads.');
+    lines.push('');
+  }
+  
+  // Firmware versions
+  if (health.firmwareVersions.length > 0) {
+    lines.push('--- FIRMWARE VERSIONS ---');
+    for (const version of health.firmwareVersions) {
+      lines.push('  ' + version);
+    }
+    lines.push('');
+  }
+  
+  // Firmware changes
+  if (health.firmwareChanges.length > 0) {
+    lines.push('--- FIRMWARE CHANGES ---');
+    for (const change of health.firmwareChanges) {
+      lines.push(`  ${change.from} → ${change.to}`);
+      lines.push(`    At: ${change.at}`);
+    }
+    lines.push('');
+  }
+  
+  // Anomalies
+  if (health.anomalies.length > 0) {
+    lines.push('--- ANOMALIES DETECTED ---');
+    
+    // Group by severity
+    const high = health.anomalies.filter(a => a.severity === 'HIGH');
+    const medium = health.anomalies.filter(a => a.severity === 'MEDIUM');
+    const low = health.anomalies.filter(a => a.severity === 'LOW');
+    
+    if (high.length > 0) {
+      lines.push('');
+      lines.push('HIGH SEVERITY:');
+      for (const anomaly of high) {
+        lines.push(`  [${anomaly.metric.toUpperCase()}] ${anomaly.message}`);
+        if (anomaly.timestamp) {
+          lines.push(`    Time: ${anomaly.timestamp}`);
+        }
+      }
+    }
+    
+    if (medium.length > 0) {
+      lines.push('');
+      lines.push('MEDIUM SEVERITY:');
+      for (const anomaly of medium) {
+        lines.push(`  [${anomaly.metric.toUpperCase()}] ${anomaly.message}`);
+        if (anomaly.timestamp) {
+          lines.push(`    Time: ${anomaly.timestamp}`);
+        }
+      }
+    }
+    
+    if (low.length > 0) {
+      lines.push('');
+      lines.push('LOW SEVERITY:');
+      for (const anomaly of low) {
+        lines.push(`  [${anomaly.metric.toUpperCase()}] ${anomaly.message}`);
+        if (anomaly.timestamp) {
+          lines.push(`    Time: ${anomaly.timestamp}`);
+        }
+      }
+    }
+    
+    lines.push('');
+  } else {
+    lines.push('--- ANOMALIES ---');
+    lines.push('No anomalies detected');
+    lines.push('');
+  }
+  
+  // Data quality
+  if (health.parsingErrors > 0) {
+    lines.push('--- DATA QUALITY ---');
+    lines.push(`Warning: ${health.parsingErrors} payload(s) could not be parsed`);
+    lines.push('');
+  }
+  
+  lines.push('================================================================');
+  lines.push('');
+  
+  return lines.join('\n');
+}
+
+/**
+ * Format correlation window for display
+ */
+function formatCorrelationWindow(window: CorrelationWindow, index: number): string {
+  const lines: string[] = [];
+  
+  lines.push('');
+  lines.push(`Window ${index + 1}`);
+  lines.push('----------------------------------------------------------------');
+  lines.push(`Time Range: ${window.startTime} to ${window.endTime}`);
+  lines.push(`Duration:   ${window.durationMinutes} minutes`);
+  lines.push(`Events:     ${window.events.length}`);
+  lines.push('');
+  
+  // Telemetry
+  if (window.telemetry.length > 0) {
+    lines.push('TELEMETRY:');
+    for (const tel of window.telemetry) {
+      const metrics: string[] = [];
+      if (tel.battery !== undefined) metrics.push(`battery=${tel.battery.toFixed(1)}%`);
+      if (tel.connecttime !== undefined) metrics.push(`connecttime=${tel.connecttime}s`);
+      if (tel.temperature !== undefined) metrics.push(`temp=${tel.temperature.toFixed(1)}°C`);
+      if (tel.resets !== undefined) metrics.push(`resets=${tel.resets}`);
+      if (tel.alerts !== undefined) metrics.push(`alerts=${tel.alerts}`);
+      if (tel.occupancy !== undefined) metrics.push(`occupancy=${tel.occupancy}`);
+      
+      lines.push(`  - ${tel.eventName}: ${metrics.join(', ')}`);
+    }
+    lines.push('');
+  }
+  
+  // Watchdog
+  if (window.watchdog.length > 0) {
+    lines.push('WATCHDOG:');
+    for (const wd of window.watchdog) {
+      if (wd.resetCause) {
+        lines.push(`  - ${wd.eventName}: reset cause=${wd.resetCause}`);
+      } else {
+        lines.push(`  - ${wd.eventName}`);
+      }
+      if (wd.details) {
+        lines.push(`    ${wd.details.substring(0, 80)}`);
+      }
+    }
+    lines.push('');
+  }
+  
+  // Status
+  if (window.status.length > 0) {
+    lines.push('STATUS:');
+    for (const st of window.status) {
+      const metrics: string[] = [];
+      if (st.cloudRecoverStage !== undefined) metrics.push(`cloudRecoverStage=${st.cloudRecoverStage}`);
+      if (st.networkState) metrics.push(`networkState=${st.networkState}`);
+      if (st.queueDepth !== undefined) metrics.push(`queueDepth=${st.queueDepth}`);
+      
+      if (metrics.length > 0) {
+        lines.push(`  - ${st.eventName}: ${metrics.join(', ')}`);
+      } else {
+        lines.push(`  - ${st.eventName}`);
+      }
+    }
+    lines.push('');
+  }
+  
+  // Serial Lifecycle
+  if (window.serialLifecycle.length > 0) {
+    lines.push('SERIAL LIFECYCLE:');
+    for (const sl of window.serialLifecycle) {
+      lines.push(`  - ${sl.eventType}`);
+      if (sl.details) {
+        lines.push(`    ${sl.details.substring(0, 80)}`);
+      }
+    }
+    lines.push('');
+  }
+  
+  // Serial Logs
+  if (window.serialLogs.length > 0) {
+    lines.push('SERIAL LOGS:');
+    const displayCount = Math.min(5, window.serialLogs.length);
+    for (let i = 0; i < displayCount; i++) {
+      const log = window.serialLogs[i];
+      lines.push(`  - [${log.category}] ${log.logLine.substring(0, 70)}`);
+    }
+    if (window.serialLogs.length > displayCount) {
+      lines.push(`  ... and ${window.serialLogs.length - displayCount} more logs`);
+    }
+    lines.push('');
+  }
+  
+  // Inferences
+  if (window.inferences.length > 0) {
+    lines.push('INFERENCES:');
+    for (const inf of window.inferences) {
+      const severityLabel = `[${inf.severity}]`.padEnd(12);
+      lines.push(`  ${severityLabel} ${inf.message}`);
+      lines.push(`    Category: ${inf.category}`);
+      if (inf.evidence.length > 0) {
+        lines.push(`    Evidence:`);
+        for (const ev of inf.evidence.slice(0, 3)) {
+          lines.push(`      - ${ev.substring(0, 70)}`);
+        }
+        if (inf.evidence.length > 3) {
+          lines.push(`      ... and ${inf.evidence.length - 3} more`);
+        }
+      }
+    }
+    lines.push('');
+  } else {
+    lines.push('INFERENCES:');
+    lines.push('  No significant patterns detected');
+    lines.push('');
+  }
+  
+  return lines.join('\n');
+}
+
+/**
+ * Format correlation analysis summary
+ */
+export function formatCorrelationAnalysis(analysis: CorrelationAnalysis): string {
+  const lines: string[] = [];
+  
+  lines.push('');
+  lines.push('================================================================');
+  lines.push('  EVENT CORRELATION ANALYSIS');
+  lines.push('================================================================');
+  lines.push('');
+  lines.push('Device ID:       ' + analysis.deviceId);
+  lines.push('Time Range:      ' + analysis.startTime + ' to ' + analysis.endTime);
+  lines.push('Window Duration: ' + analysis.windowDurationMinutes + ' minutes');
+  lines.push('Window Count:    ' + analysis.windowCount);
+  lines.push('');
+  
+  // Summary
+  lines.push('--- SUMMARY ---');
+  lines.push(`Total Inferences: ${analysis.summary.totalInferences}`);
+  lines.push(`  Critical:       ${analysis.summary.criticalCount}`);
+  lines.push(`  Warning:        ${analysis.summary.warningCount}`);
+  lines.push(`  Info:           ${analysis.summary.infoCount}`);
+  lines.push('');
+  
+  if (Object.keys(analysis.summary.topCategories).length > 0) {
+    lines.push('Top Categories:');
+    const sorted = Object.entries(analysis.summary.topCategories)
+      .sort((a, b) => b[1] - a[1]);
+    for (const [category, count] of sorted) {
+      lines.push(`  ${category.padEnd(15)} ${count}`);
+    }
+    lines.push('');
+  }
+  
+  lines.push('================================================================');
+  lines.push('');
+  
+  // Windows
+  for (let i = 0; i < analysis.windows.length; i++) {
+    lines.push(formatCorrelationWindow(analysis.windows[i], i));
+  }
+  
   lines.push('================================================================');
   lines.push('');
   

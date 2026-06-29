@@ -20,8 +20,10 @@
 import { Command } from 'commander';
 import { queryDeviceTimeline, hoursAgo } from './lib/dynamo-query';
 import { fetchRawEvent } from './lib/s3-fetch';
-import { formatTimelineHeader, formatTimelineEvent, formatRawEvent, formatError, formatTimelineSummary } from './lib/formatters';
+import { formatTimelineHeader, formatTimelineEvent, formatRawEvent, formatError, formatTimelineSummary, formatHealthSummary, formatCorrelationAnalysis } from './lib/formatters';
 import { analyzeTimeline } from './lib/analytics';
+import { analyzeDeviceHealth } from './lib/health';
+import { correlateEvents } from './lib/correlation';
 
 const program = new Command();
 
@@ -35,6 +37,9 @@ program
   .option('-e, --end <ISO8601>', 'End time (ISO 8601 format)')
   .option('-l, --limit <number>', 'Maximum number of events to return', '100')
   .option('--summary', 'Show analytics summary before detailed timeline')
+  .option('--health', 'Show payload-aware health diagnostics (fetches all S3 events)')
+  .option('--correlate', 'Show event correlation analysis (groups events by time windows)')
+  .option('--window <minutes>', 'Correlation window duration in minutes', '5')
   .option('--gap-threshold <minutes>', 'Time gap threshold in minutes for gap detection', '90')
   .option('-r, --show-raw [index]', 'Show raw S3 event data (optionally specify event index, default: all)')
   .option('-p, --profile <profile>', 'AWS profile to use', 'particle-admin')
@@ -125,6 +130,47 @@ async function main() {
       },
       options.profile
     );
+    
+    // Generate and display correlation analysis if requested
+    if (options.correlate) {
+      console.log('\nFetching S3 payloads for correlation analysis...');
+      const payloadMap = new Map();
+      for (const event of events) {
+        try {
+          const payload = await fetchRawEvent(bucketName, event.s3Key, options.profile);
+          payloadMap.set(event.s3Key, payload);
+        } catch (error) {
+          console.error(`Warning: Failed to fetch ${event.s3Key}`);
+        }
+      }
+      
+      const windowMinutes = parseInt(options.window, 10);
+      const correlation = await correlateEvents(options.deviceId, events, payloadMap, windowMinutes);
+      console.log(formatCorrelationAnalysis(correlation));
+      
+      // Exit early if correlate mode, don't show detailed timeline
+      return;
+    }
+    
+    // Generate and display health summary if requested
+    if (options.health) {
+      console.log('\nFetching S3 payloads for health analysis...');
+      const s3Payloads = [];
+      for (const event of events) {
+        try {
+          const payload = await fetchRawEvent(bucketName, event.s3Key, options.profile);
+          s3Payloads.push(payload);
+        } catch (error) {
+          console.error(`Warning: Failed to fetch ${event.s3Key}`);
+        }
+      }
+      
+      const health = await analyzeDeviceHealth(options.deviceId, events, s3Payloads);
+      console.log(formatHealthSummary(health));
+      
+      // Exit early if health mode, don't show detailed timeline
+      return;
+    }
     
     // Generate and display summary if requested
     if (options.summary) {

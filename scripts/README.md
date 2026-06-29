@@ -50,6 +50,21 @@ npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --limit 50
 npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --summary
 ```
 
+**Show health diagnostics:**
+```bash
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --health
+```
+
+**Show event correlation analysis:**
+```bash
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --correlate
+```
+
+**Custom correlation window:**
+```bash
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --correlate --window 10
+```
+
 **Custom gap threshold:**
 ```bash
 npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --summary --gap-threshold 30
@@ -88,6 +103,9 @@ npm run timeline -- \
 | `-l, --limit <number>` | Max events to return | `100` |
 | `-r, --show-raw [index]` | Show raw S3 data (all or specific) | - |
 | `--summary` | Show analytics summary before timeline | - |
+| `--health` | Show payload-aware health diagnostics | - |
+| `--correlate` | Show event correlation analysis | - |
+| `--window <minutes>` | Correlation window duration in minutes | `5` |
 | `--gap-threshold <minutes>` | Time gap threshold for detection | `90` |
 | `-p, --profile <profile>` | AWS profile | `particle-admin` |
 | `-t, --table <name>` | DynamoDB table name | Auto-detect |
@@ -119,6 +137,46 @@ With `--show-raw`, it also displays the complete raw webhook payload and parsed 
 - Serial lifecycle event counts (if present)
 - Detected anomalies
 
+**Health Diagnostics** (with `--health` flag):
+- Battery level (latest, min, max, average, change)
+- Connection time (latest, min, max, average)
+- Reset count (latest, change over window)
+- Alert count (latest, non-zero detection)
+- Temperature (latest, min, max, average, change)
+- Occupancy metrics (current and daily)
+- Firmware version tracking and changes
+- Anomaly detection:
+  - Battery < 30% (critical)
+  - Connection time > 180s (high)
+  - Reset count increases
+  - Active alerts (non-zero)
+  - Firmware version changes
+  - Rapid battery drain
+
+**Event Correlation** (with `--correlate` flag):
+- Groups events into configurable time windows (default 5 minutes)
+- Correlates different event types: telemetry, watchdog, status, serial lifecycle, serial logs
+- Extracts and displays:
+  - Telemetry data (battery, connection time, temperature, resets, alerts, occupancy)
+  - Watchdog events with reset causes
+  - Status data (cloud recovery stage, network state, queue depth)
+  - Serial lifecycle events (connect/disconnect/missing)
+  - Serial logs categorized by type (modem, network, power, error, reconnect)
+- Applies 8 heuristic inference rules to detect:
+  1. Connectivity degradation (high connection time + modem errors)
+  2. USB instability (repeated serial connect/disconnect cycles)
+  3. Network stall causing watchdog (watchdog + high connection time)
+  4. Device reboot (reset count increase + watchdog)
+  5. Power anomaly (low battery + alerts)
+  6. Reconnect loop (multiple reconnect attempts)
+  7. High connection time alone (> 180s)
+  8. Critical battery alone (< 20%)
+- Shows summary statistics:
+  - Total inferences across all windows
+  - Count by severity (critical, warning, info)
+  - Top inference categories (connectivity, power, stability, hardware)
+- Each inference includes category, severity, message, and supporting evidence
+
 #### Examples
 
 **Troubleshoot missing events:**
@@ -149,6 +207,25 @@ npm run timeline -- \
   --deviceId e00fce68e4fa8ab3f8faa207 \
   --hours 1 \
   --summary
+```
+
+**Investigate device connectivity issues:**
+```bash
+# Use correlation to identify root causes
+npm run timeline -- \
+  --deviceId e00fce68e4fa8ab3f8faa207 \
+  --hours 24 \
+  --correlate
+```
+
+**Analyze device reboot causes:**
+```bash
+# Use wider correlation window for pattern detection
+npm run timeline -- \
+  --deviceId e00fce68e4fa8ab3f8faa207 \
+  --hours 48 \
+  --correlate \
+  --window 10
 ```
 
 ## Testing

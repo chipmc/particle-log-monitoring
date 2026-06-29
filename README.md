@@ -122,6 +122,8 @@ npm run timeline -- --deviceId <deviceId> --hours 24
 - Display chronological events
 - Fetch raw S3 event data
 - **Analytics summary mode** (gaps, bursts, anomalies, performance)
+- **Health diagnostics mode** (battery, connection time, resets, alerts, temperature)
+- **Event correlation mode** (identify patterns and causal relationships across event types)
 - Read-only (no AWS modification)
 
 **Quick examples:**
@@ -131,6 +133,12 @@ npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24
 
 # With analytics summary
 npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --summary
+
+# With health diagnostics
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --health
+
+# With event correlation
+npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 --hours 24 --correlate
 
 # Specific time range
 npm run timeline -- --deviceId e00fce68e4fa8ab3f8faa207 \
