@@ -1,147 +1,88 @@
 /**
- * Particle Log Ingestion Lambda
+ * Particle Log Monitoring Lambda - Main Handler
  * 
- * Main handler for webhook ingestion from:
- * - Particle Product Webhooks
- * - Raspberry Pi Serial Forwarder
+ * Routes requests between ingestion and query handlers:
+ * - POST /particle/log → Ingestion (Phase 1 + 2A)
+ * - GET /device/... → Query API (Phase 2B)
  * 
  * Phase 1: Extracted from inline CDK code (exact behavior preservation)
  * Phase 2A: Additive normalization and enrichment pipeline
- * 
- * Architecture:
- * - Webhook auth via X-Particle-Webhook-Secret header
- * - Raw event immutable storage in S3
- * - Fast indexed retrieval via DynamoDB
+ * Phase 2B: Read-only query API for browser/API observability
  */
 
-import { InboundEvent, LambdaResponse, ParticleWebhook } from './types';
-import { storeRawEvent } from './storage/s3';
-import { indexEvent } from './storage/dynamo';
-import {
-  parseEventBody,
-  buildParsedEvent,
-  extractDeviceId,
-  extractTimestamp,
-  extractEventName,
-  generateS3Key,
-  safeParseData,
-  normalizeEvent,
-} from './utils/parse';
-import { NormalizedEventFields } from './types';
+import { InboundEvent, QueryEvent, LambdaResponse } from './types';
+import { handleIngestion } from './ingestion';
+import { handleQuery } from './query';
 
 /**
- * Main Lambda handler
+ * Main Lambda handler - Route dispatcher
  * 
- * Preserves exact current behavior:
- * - 401 if webhook secret missing/invalid
- * - 400 if JSON body invalid
- * - 200 on successful storage
- * - Same logging output
+ * Preserves exact ingestion behavior for POST /particle/log.
+ * Adds new GET endpoints for telemetry queries.
+ * 
+ * Accepts both:
+ * - InboundEvent (simple POST with body/headers only) - for backward compat
+ * - QueryEvent (HTTP API v2 format) - primary production format
+ * 
+ * @param event - API Gateway event (HTTP API v2 or legacy format)
+ * @returns Lambda response
  */
-export async function handler(event: InboundEvent): Promise<LambdaResponse> {
-  // ============================================================================
-  // Authentication (Exact Current Behavior)
-  // ============================================================================
+export async function handler(event: InboundEvent | QueryEvent): Promise<LambdaResponse> {
+  // Detect event format and extract HTTP method
+  // HTTP API v2 uses requestContext.http.method and has version/routeKey fields
+  let method: string;
+  let path: string;
   
-  const expectedSecret = process.env.PARTICLE_WEBHOOK_SECRET;
-  const providedSecret =
-    event.headers?.['x-particle-webhook-secret'] ||
-    event.headers?.['X-Particle-Webhook-Secret'];
+  // Type guard: Check for QueryEvent (HTTP API v2)
+  const isQueryEvent = (evt: InboundEvent | QueryEvent): evt is QueryEvent => {
+    return 'version' in evt && 'routeKey' in evt && 'requestContext' in evt;
+  };
 
-  if (!expectedSecret || providedSecret !== expectedSecret) {
-    console.warn('Unauthorized webhook attempt');
-    return {
-      statusCode: 401,
-      body: JSON.stringify({ ok: false, error: 'unauthorized' }),
-    };
+  if (isQueryEvent(event)) {
+    // HTTP API v2 format (production)
+    method = event.requestContext.http.method;
+    path = event.requestContext.http.path;
+  } else {
+    // Legacy InboundEvent format (tests/backward compat)
+    method = 'POST';
+    path = '/particle/log';
   }
 
-  // ============================================================================
-  // Parse Request Body (Exact Current Behavior)
-  // ============================================================================
-  
-  let body: ParticleWebhook;
-  try {
-    body = parseEventBody(event.body);
-  } catch (err) {
-    console.error('Invalid JSON body', err);
-    return {
-      statusCode: 400,
-      body: JSON.stringify({ ok: false, error: 'invalid_json' }),
-    };
+  console.log('Request:', {
+    method,
+    path,
+    routeKey: isQueryEvent(event) ? event.routeKey : undefined,
+    deviceId: isQueryEvent(event) ? event.pathParameters?.deviceId : undefined,
+  });
+
+  // Route to appropriate handler based on HTTP method
+  if (method === 'POST') {
+    // POST /particle/log → Ingestion (exact Phase 1 + 2A behavior)
+    // Both InboundEvent and QueryEvent are compatible with handleIngestion
+    return handleIngestion(event);
   }
 
-  // ============================================================================
-  // Extract Event Fields (Exact Current Behavior)
-  // ============================================================================
-  
-  const eventName = extractEventName(body);
-  const deviceId = extractDeviceId(body);
-  const publishedAt = extractTimestamp(body);
-  const parsedData = safeParseData(body.data);
-
-  const parsed = buildParsedEvent(
-    body,
-    event.requestContext?.http?.userAgent,
-    event.requestContext?.http?.sourceIp
-  );
-
-  // ============================================================================
-  // Storage Operations (Exact Current Behavior)
-  // ============================================================================
-  
-  const s3Key = generateS3Key(eventName, deviceId, publishedAt);
-
-  let normalized: NormalizedEventFields | undefined;
-  try {
-    normalized = normalizeEvent(body, parsedData, {
-      deviceId,
-      eventName,
-      eventTime: publishedAt,
-      s3Key,
-    });
-  } catch (err) {
-    // Enrichment must never prevent the existing raw/index storage path.
-    console.warn('Event normalization failed; preserving ingestion', err);
+  if (method === 'GET') {
+    // GET /device/... → Query API (Phase 2B)
+    // Must be a QueryEvent with full structure
+    if (!isQueryEvent(event)) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          error: 'bad_request',
+          message: 'Query requests require full HTTP API v2 event structure',
+        }),
+      };
+    }
+    return handleQuery(event);
   }
 
-  // Store raw event in S3 (immutable archive)
-  await storeRawEvent(
-    process.env.RAW_LOGS_BUCKET_NAME!,
-    s3Key,
-    body,
-    parsed
-  );
-
-  // Index event in DynamoDB (fast retrieval)
-  await indexEvent(
-    process.env.LOG_EVENTS_TABLE_NAME!,
-    deviceId,
-    publishedAt,
-    eventName,
-    parsed.receivedAt,
-    s3Key,
-    body,
-    parsedData,
-    normalized
-  );
-
-  // ============================================================================
-  // Logging and Response (Exact Current Behavior)
-  // ============================================================================
-  
-  console.log(
-    'Stored Particle event:',
-    JSON.stringify({
-      eventName,
-      deviceId,
-      publishedAt,
-      s3Key,
-    })
-  );
-
+  // Unsupported method
   return {
-    statusCode: 200,
-    body: JSON.stringify({ ok: true, stored: true }),
+    statusCode: 405,
+    body: JSON.stringify({
+      error: 'method_not_allowed',
+      message: `Method ${method} not allowed`,
+    }),
   };
 }

@@ -1,22 +1,67 @@
 # Lambda Development
 
+## Overview
+
+Unified Lambda handler for Particle telemetry ingestion and query API.
+
+**Capabilities:**
+- POST /particle/log - Webhook ingestion (Phase 1 + 2A)
+- GET /device/... - Read-only query API (Phase 2B)
+
 ## Directory Structure
 
 ```
 lambda/
 ├── src/
-│   ├── handler.ts           # Main Lambda entry point
+│   ├── handler.ts           # Main Lambda entry point (route dispatcher)
+│   ├── ingestion.ts         # Webhook ingestion handler (Phase 1 + 2A)
+│   ├── query.ts             # Query API route handler (Phase 2B)
+│   ├── query/
+│   │   ├── timeline.ts      # GET /device/{deviceId}/timeline
+│   │   ├── health.ts        # GET /device/{deviceId}/health
+│   │   ├── summary.ts       # GET /device/{deviceId}/summary
+│   │   └── anomalies.ts     # GET /device/{deviceId}/anomalies
 │   ├── storage/
-│   │   ├── s3.ts           # S3 raw event storage
-│   │   └── dynamo.ts       # DynamoDB event indexing
+│   │   ├── s3.ts            # S3 write operations
+│   │   ├── dynamo.ts        # DynamoDB write operations
+│   │   └── dynamo-read.ts   # DynamoDB query operations (Phase 2B)
 │   ├── utils/
-│   │   └── parse.ts        # Event parsing utilities
+│   │   ├── parse.ts         # Event parsing and normalization
+│   │   ├── query-params.ts  # Query parameter parsing (Phase 2B)
+│   │   ├── response.ts      # API response formatting (Phase 2B)
+│   │   └── anomaly-detection.ts # Health anomaly detection (Phase 2B)
 │   └── types/
-│       └── index.ts        # TypeScript type definitions
+│       └── index.ts         # TypeScript type definitions
 ├── tests/                   # Unit tests
 ├── package.json
 ├── tsconfig.json
 └── jest.config.js
+```
+
+## Request Flow
+
+### Ingestion (POST /particle/log)
+
+```
+API Gateway
+  → handler.ts (dispatcher)
+    → ingestion.ts
+      → parse.ts (normalize event)
+      → s3.ts (store raw)
+      → dynamo.ts (index)
+    → Response: {ok: true, stored: true}
+```
+
+### Query (GET /device/{deviceId}/...)
+
+```
+API Gateway
+  → handler.ts (dispatcher)
+    → query.ts (route handler)
+      → timeline.ts | health.ts | summary.ts | anomalies.ts
+        → dynamo-read.ts (query DynamoDB)
+        → anomaly-detection.ts (detect issues)
+    → Response: JSON telemetry data
 ```
 
 ## Development Workflow
@@ -35,24 +80,47 @@ npm run build
 ```
 
 Output: `dist/` directory with compiled JavaScript
+Request Routing (Phase 2B)
 
-### Run Tests
+The main `handler.ts` dispatches requests based on HTTP method:
 
-```bash
-npm test
-```
+- **POST requests** → `ingestion.ts` (unchanged Phase 1 + 2A behavior)
+- **GET requests** → `query.ts` → specific query endpoint
 
-Watch mode:
-```bash
-npm run test:watch
-```
+This preserves the existing ingestion path while adding read-only query capabilities.
 
-### Local Development
+### Current Behavior (Phase 2A)
 
-The Lambda is deployed via CDK. For local testing:
+Ingestion implementation preserves Phase 1 behavior and adds best-effort normalization:
 
-1. Run unit tests to verify logic
-2. Use CDK local testing if needed
+- Authentication via webhook secret header
+- S3 immutable raw event storage
+- DynamoDB fast indexed retrieval
+- Unchanged `deviceId` partition key and `eventTime` sort key
+- Existing DynamoDB attributes retained
+- Stable `plane` and `eventType` classification
+- Common Particle webhook metrics extracted into normalized fields
+- Serial severity extraction from `logLine`
+- Deterministic event IDs and S3 `rawRef`
+- Synthetic timestamp marking
+- Unknown and malformed payloads accepted
+
+Normalized attributes are added to the existing DynamoDB item. Raw S3 object remains immutable.
+
+### Query API (Phase 2B)
+
+New read-only endpoints for device telemetry:
+
+- **Timeline**: Chronological event list with normalized fields
+- **Health**: Device health metrics and anomaly detection
+- **Summary**: High-level device statistics and aggregations
+- **Anomalies**: Detected issues based on health rules
+
+**Data Source:** DynamoDB normalized fields (no S3 reads required)
+
+**Authentication:** Currently reuses webhook secret. Should migrate to separate API keys/OAuth for production browser access.
+
+See `../docs/API.md` for complete API documentation.
 3. Deploy to AWS and test with real webhooks
 
 ## Testing

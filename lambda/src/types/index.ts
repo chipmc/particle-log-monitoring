@@ -9,7 +9,7 @@
  * API Gateway HTTP event structure
  */
 export interface InboundEvent {
-  body: string;
+  body?: string;
   headers: Record<string, string | undefined>;
   requestContext?: {
     http?: {
@@ -150,4 +150,140 @@ export interface DynamoIndexRecord {
 export interface LambdaResponse {
   statusCode: number;
   body: string;
+}
+
+/**
+ * Phase 2B: Query API Types
+ */
+
+/**
+ * API Gateway HTTP API v2 event structure
+ * https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
+ */
+export interface QueryEvent {
+  version: string;
+  routeKey: string;
+  rawPath: string;
+  rawQueryString?: string;
+  headers: Record<string, string | undefined>;
+  queryStringParameters?: Record<string, string | undefined>;
+  pathParameters?: Record<string, string | undefined>;
+  body?: string;
+  isBase64Encoded?: boolean;
+  requestContext: {
+    accountId: string;
+    apiId: string;
+    domainName: string;
+    domainPrefix: string;
+    http: {
+      method: string;
+      path: string;
+      protocol: string;
+      sourceIp: string;
+      userAgent: string;
+    };
+    requestId: string;
+    routeKey: string;
+    stage: string;
+    time: string;
+    timeEpoch: number;
+  };
+}
+
+/**
+ * Timeline query response
+ */
+export interface TimelineEvent {
+  eventTime: string;
+  eventName: string;
+  eventType?: string;
+  plane?: string;
+  battery?: number;
+  connectTime?: number;
+  resetCount?: number;
+  alertCount?: number;
+  temperature?: number;
+  occupancy?: number;
+  dailyOccupancy?: number;
+  severity?: string;
+  s3Key: string;
+  fwVersion?: string;
+}
+
+export interface TimelineResponse {
+  deviceId: string;
+  start: string;
+  end: string;
+  count: number;
+  events: TimelineEvent[];
+}
+
+/**
+ * Health query response
+ */
+export interface MetricStats {
+  latest: number;
+  min: number;
+  max: number;
+  average: number;
+  change?: number;
+}
+
+export interface OccupancyStats {
+  latest: number;
+  total: number;
+}
+
+export interface TimeSpan {
+  start: string;
+  end: string;
+  hours: number;
+}
+
+export interface HealthAnomaly {
+  severity: 'low' | 'medium' | 'high';
+  type: string;
+  eventTime: string;
+  message: string;
+  value?: number | string;
+}
+
+export interface HealthResponse {
+  deviceId: string;
+  timeSpan: TimeSpan;
+  eventCount: number;
+  battery?: MetricStats;
+  connectTime?: MetricStats;
+  resetCount?: MetricStats;
+  alertCount?: MetricStats;
+  temperature?: MetricStats;
+  occupancy?: OccupancyStats;
+  firmwareVersions: string[];
+  anomalies: HealthAnomaly[];
+}
+
+/**
+ * Summary query response
+ */
+export interface SummaryResponse {
+  deviceId: string;
+  eventCount: number;
+  firstEventTime: string;
+  lastEventTime: string;
+  timeSpan: {
+    hours: number;
+  };
+  eventCounts: Record<string, number>;
+  planes: Record<string, number>;
+  firmwareVersions: string[];
+  recentAnomalyCount: number;
+}
+
+/**
+ * Anomalies query response
+ */
+export interface AnomaliesResponse {
+  deviceId: string;
+  count: number;
+  anomalies: HealthAnomaly[];
 }

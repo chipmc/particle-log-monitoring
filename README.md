@@ -1,16 +1,34 @@
 Particle Log Monitoring
 
-Unified telemetry ingestion platform for Particle IoT devices.
+Unified telemetry ingestion and query platform for Particle IoT devices.
 
 Purpose
 
-This system captures both:
+This system captures and provides query access to:
 
 * structured device telemetry
 * watchdog/reset forensic events
 * raw serial runtime logs
 
 into AWS for long-term observability and diagnostics.
+
+⸻
+
+## Features
+
+**Ingestion (Phase 1 + 2A):**
+- Particle Product Webhook ingestion
+- Raspberry Pi Serial Forwarder support
+- Immutable raw event storage in S3
+- Fast indexed retrieval via DynamoDB
+- Normalized telemetry fields and event classification
+
+**Query API (Phase 2B):**
+- Read-only HTTP API for device telemetry
+- Timeline queries with time range filtering
+- Health metrics and anomaly detection
+- Device summary statistics
+- Browser/API-based observability foundation
 
 ⸻
 
@@ -52,6 +70,15 @@ Particle / Pi
 → S3 raw archive
 → DynamoDB indexed events
 
+**API Endpoints:**
+- `POST /particle/log` - Webhook ingestion
+- `GET /device/{deviceId}/timeline` - Event timeline
+- `GET /device/{deviceId}/health` - Health metrics
+- `GET /device/{deviceId}/summary` - Device summary
+- `GET /device/{deviceId}/anomalies` - Anomaly detection
+
+See [docs/API.md](docs/API.md) for complete API reference.
+
 ⸻
 
 Production Traffic Pattern
@@ -76,6 +103,24 @@ npm test
 ```
 
 See `lambda/README.md` for Lambda development guide.
+
+⸻
+
+Query API
+
+See `docs/API.md` for complete API documentation.
+
+Quick example:
+
+```bash
+# Get device timeline
+curl "https://<api-url>/device/<deviceId>/timeline?hours=24" \
+  -H "x-particle-webhook-secret: <secret>"
+
+# Get device health
+curl "https://<api-url>/device/<deviceId>/health?hours=24" \
+  -H "x-particle-webhook-secret: <secret>"
+```
 
 ⸻
 

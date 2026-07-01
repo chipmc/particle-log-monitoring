@@ -11,11 +11,12 @@
 import { handler } from '../handler';
 import { storeRawEvent } from '../storage/s3';
 import { indexEvent } from '../storage/dynamo';
-import { InboundEvent } from '../types';
+import { InboundEvent, QueryEvent } from '../types';
 
 // Mock AWS SDK clients
 jest.mock('../storage/s3');
 jest.mock('../storage/dynamo');
+jest.mock('../storage/dynamo-read');
 
 const mockStoreRawEvent = storeRawEvent as jest.MockedFunction<typeof storeRawEvent>;
 const mockIndexEvent = indexEvent as jest.MockedFunction<typeof indexEvent>;
@@ -326,6 +327,211 @@ describe('Lambda Handler', () => {
 
       expect(mockStoreRawEvent).toHaveBeenCalledTimes(500);
       expect(mockIndexEvent).toHaveBeenCalledTimes(500);
+    });
+  });
+
+  describe('HTTP API v2 Routing', () => {
+    // Helper to create realistic HTTP API v2 event
+    const createHttpApiV2Event = (
+      method: string,
+      path: string,
+      routeKey: string,
+      pathParameters?: Record<string, string>,
+      queryStringParameters?: Record<string, string>,
+      body?: string,
+      headers?: Record<string, string>
+    ): QueryEvent => ({
+      version: '2.0',
+      routeKey,
+      rawPath: path,
+      rawQueryString: queryStringParameters 
+        ? Object.entries(queryStringParameters).map(([k, v]) => `${k}=${v}`).join('&')
+        : '',
+      headers: headers || {},
+      queryStringParameters,
+      pathParameters,
+      body,
+      isBase64Encoded: false,
+      requestContext: {
+        accountId: '123456789012',
+        apiId: 'test-api-id',
+        domainName: 'test.execute-api.us-east-1.amazonaws.com',
+        domainPrefix: 'test',
+        http: {
+          method,
+          path,
+          protocol: 'HTTP/1.1',
+          sourceIp: '1.2.3.4',
+          userAgent: 'curl/7.64.1',
+        },
+        requestId: 'test-request-id',
+        routeKey,
+        stage: '$default',
+        time: '01/Jul/2026:00:00:00 +0000',
+        timeEpoch: 1719792000000,
+      },
+    });
+
+    describe('POST /particle/log (Ingestion)', () => {
+      it('should route POST to ingestion handler', async () => {
+        const event = createHttpApiV2Event(
+          'POST',
+          '/particle/log',
+          'POST /particle/log',
+          undefined,
+          undefined,
+          JSON.stringify({ event: 'test', coreid: 'device123' }),
+          { 'x-particle-webhook-secret': 'test-secret-123' }
+        );
+
+        mockStoreRawEvent.mockResolvedValue();
+        mockIndexEvent.mockResolvedValue();
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(200);
+        expect(mockStoreRawEvent).toHaveBeenCalled();
+        expect(mockIndexEvent).toHaveBeenCalled();
+      });
+
+      it('should require webhook secret on POST', async () => {
+        const event = createHttpApiV2Event(
+          'POST',
+          '/particle/log',
+          'POST /particle/log',
+          undefined,
+          undefined,
+          JSON.stringify({ event: 'test', coreid: 'device123' })
+        );
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(401);
+        expect(JSON.parse(response.body)).toEqual({
+          ok: false,
+          error: 'unauthorized',
+        });
+        expect(mockStoreRawEvent).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('GET /device/{deviceId}/timeline', () => {
+      it('should route GET to query handler without requiring body', async () => {
+        const event = createHttpApiV2Event(
+          'GET',
+          '/device/e00fce6841443bcc0f3178e4/timeline',
+          'GET /device/{deviceId}/timeline',
+          { deviceId: 'e00fce6841443bcc0f3178e4' },
+          { hours: '24', limit: '10' },
+          undefined,
+          { 'x-particle-webhook-secret': 'test-secret-123' }
+        );
+
+        const response = await handler(event);
+
+        // Should not require body for GET
+        expect(response.statusCode).not.toBe(400);
+        const body = JSON.parse(response.body);
+        expect(body.error).not.toBe('missing_body');
+      });
+
+      it('should not enter ingestion path on GET', async () => {
+        const event = createHttpApiV2Event(
+          'GET',
+          '/device/e00fce6841443bcc0f3178e4/timeline',
+          'GET /device/{deviceId}/timeline',
+          { deviceId: 'e00fce6841443bcc0f3178e4' },
+          { hours: '24' },
+          undefined,
+          { 'x-particle-webhook-secret': 'test-secret-123' }
+        );
+
+        await handler(event);
+
+        // Verify ingestion mocks were never called
+        expect(mockStoreRawEvent).not.toHaveBeenCalled();
+        expect(mockIndexEvent).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('GET /device/{deviceId}/health', () => {
+      it('should route health endpoint correctly', async () => {
+        const event = createHttpApiV2Event(
+          'GET',
+          '/device/e00fce6841443bcc0f3178e4/health',
+          'GET /device/{deviceId}/health',
+          { deviceId: 'e00fce6841443bcc0f3178e4' },
+          { hours: '24' },
+          undefined,
+          { 'x-particle-webhook-secret': 'test-secret-123' }
+        );
+
+        const response = await handler(event);
+
+        expect(mockStoreRawEvent).not.toHaveBeenCalled();
+        expect(mockIndexEvent).not.toHaveBeenCalled();
+        expect(response.statusCode).not.toBe(401);
+      });
+    });
+
+    describe('GET /device/{deviceId}/summary', () => {
+      it('should route summary endpoint correctly', async () => {
+        const event = createHttpApiV2Event(
+          'GET',
+          '/device/e00fce6841443bcc0f3178e4/summary',
+          'GET /device/{deviceId}/summary',
+          { deviceId: 'e00fce6841443bcc0f3178e4' },
+          undefined,
+          undefined,
+          { 'x-particle-webhook-secret': 'test-secret-123' }
+        );
+
+        const response = await handler(event);
+
+        expect(mockStoreRawEvent).not.toHaveBeenCalled();
+        expect(mockIndexEvent).not.toHaveBeenCalled();
+        expect(response.statusCode).not.toBe(401);
+      });
+    });
+
+    describe('GET /device/{deviceId}/anomalies', () => {
+      it('should route anomalies endpoint correctly', async () => {
+        const event = createHttpApiV2Event(
+          'GET',
+          '/device/e00fce6841443bcc0f3178e4/anomalies',
+          'GET /device/{deviceId}/anomalies',
+          { deviceId: 'e00fce6841443bcc0f3178e4' },
+          { hours: '168' },
+          undefined,
+          { 'x-particle-webhook-secret': 'test-secret-123' }
+        );
+
+        const response = await handler(event);
+
+        expect(mockStoreRawEvent).not.toHaveBeenCalled();
+        expect(mockIndexEvent).not.toHaveBeenCalled();
+        expect(response.statusCode).not.toBe(401);
+      });
+    });
+
+    describe('Method validation', () => {
+      it('should reject unsupported HTTP methods', async () => {
+        const event = createHttpApiV2Event(
+          'PUT',
+          '/particle/log',
+          'PUT /particle/log',
+          undefined,
+          undefined,
+          JSON.stringify({ test: 'data' })
+        );
+
+        const response = await handler(event);
+
+        expect(response.statusCode).toBe(405);
+        expect(JSON.parse(response.body)).toMatchObject({
+          error: 'method_not_allowed',
+        });
+      });
     });
   });
 });
