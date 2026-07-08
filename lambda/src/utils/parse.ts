@@ -133,9 +133,11 @@ export function normalizeEvent(
   const data = parsePayloadObject(parsedData);
   const plane = classifyPlane(body, context.eventName);
   const eventType = classifyEventType(body, context.eventName, plane, data);
-  const severity = plane === 'serial' ? parseSeverity(body.logLine) : null;
-  const sourceType =
-    body.sourceType || (plane === 'serial' ? 'serial-forwarder' : 'particle-webhook');
+  const serialLogLine = getSerialLogLine(body);
+  const severity = plane === 'serial' ? parseSeverity(serialLogLine) : null;
+  const sourceType = plane === 'serial'
+    ? 'serial-forwarder'
+    : body.sourceType || 'particle-webhook';
 
   const normalized: NormalizedEventFields = {
     schemaVersion: '1.0',
@@ -154,6 +156,7 @@ export function normalizeEvent(
   addString(normalized, 'deviceName', body.deviceName);
   addString(normalized, 'collectorId', body.collectorId);
   if (severity) normalized.severity = severity;
+  if (plane === 'serial') addSerialFields(normalized, body, serialLogLine);
 
   addNumber(normalized, 'battery', getField(data, body, 'battery'));
   addNumber(normalized, 'connectTime', getField(data, body, 'connecttime'));
@@ -191,8 +194,12 @@ export function parseResetCause(/* params TBD */): string | null {
   return null;
 }
 
-export function parseQueueDepth(/* params TBD */): number | null {
-  return null;
+export function parseQueueDepth(logLine?: unknown): number | null {
+  if (typeof logLine !== 'string') return null;
+  const match = logLine.match(/(?:queue|queued|publishqueue|inflight)[^0-9]*(\d+)/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
 }
 
 export function parseNetworkState(/* params TBD */): string | null {
@@ -230,22 +237,20 @@ function classifyEventType(
 ): string {
   const name = eventName.toLowerCase();
   const sourceEventType = body.eventType?.toUpperCase();
-  const lifecycleTypes = new Set([
-    'SERIAL_CONNECTED',
-    'SERIAL_DISCONNECTED',
-    'SERIAL_MISSING',
-  ]);
-
-  if (lifecycleTypes.has(eventName.toUpperCase()) ||
-      (sourceEventType && lifecycleTypes.has(sourceEventType))) {
-    return 'serial.lifecycle';
-  }
-
-  if (
-    plane === 'serial' &&
-    (name === 'seriallog' || name === 'log' || sourceEventType === 'LOG' || !!body.logLine)
-  ) {
-    return 'serial.log';
+  if (plane === 'serial') {
+    switch (sourceEventType || eventName.toUpperCase()) {
+      case 'LOG':
+        return 'serial.log';
+      case 'SERIAL_CONNECTED':
+        return 'serial.lifecycle.connected';
+      case 'SERIAL_DISCONNECTED':
+        return 'serial.lifecycle.disconnected';
+      case 'SERIAL_MISSING':
+        return 'serial.lifecycle.missing';
+      default:
+        if (name === 'seriallog' && (!sourceEventType || !!body.logLine)) return 'serial.log';
+        return 'serial.event';
+    }
   }
 
   if (name.includes('watchdog')) return 'fault.watchdog';
@@ -326,8 +331,69 @@ function addNumber(
 
 function addString(
   target: NormalizedEventFields,
-  field: 'deviceName' | 'collectorId',
+  field: 'deviceName' | 'collectorId' | 'serialLogLine',
   value: unknown
 ): void {
   if (typeof value === 'string' && value.length > 0) target[field] = value;
+}
+
+function addSerialFields(
+  normalized: NormalizedEventFields,
+  body: ParticleWebhook,
+  serialLogLine: string | undefined
+): void {
+  if (serialLogLine) {
+    addString(normalized, 'serialLogLine', truncate(serialLogLine, 500));
+  }
+
+  normalized.serialCategory = parseSerialCategory(serialLogLine);
+
+  const networkState = parseSerialNetworkState(body.eventType, serialLogLine);
+  if (networkState) normalized.networkState = networkState;
+
+  const lowerLine = serialLogLine?.toLowerCase() || '';
+  normalized.reconnectDetected = /(reconnect|retry)/.test(lowerLine);
+  normalized.watchdogDetected = /watchdog/.test(lowerLine);
+  normalized.resetDetected = /(reset|reboot|panic)/.test(lowerLine);
+
+  const queueDepth = parseQueueDepth(serialLogLine);
+  if (queueDepth !== null) {
+    (normalized as NormalizedEventFields & { queueDepth?: number }).queueDepth = queueDepth;
+  }
+}
+
+function getSerialLogLine(body: ParticleWebhook): string | undefined {
+  if (typeof body.logLine === 'string') return body.logLine;
+  if (typeof body.data === 'string' && body.eventType?.toUpperCase() === 'LOG') return body.data;
+  return undefined;
+}
+
+function parseSerialCategory(logLine?: unknown): string | null {
+  if (typeof logLine !== 'string' || logLine.length === 0) return null;
+  const lower = logLine.toLowerCase();
+
+  if (/(modem|ncp|cellular|sim)/.test(lower)) return 'modem';
+  if (/(cloud|network|connect|reconnect|disconnect)/.test(lower)) return 'network';
+  if (/(battery|power|pmic|vbat|charge)/.test(lower)) return 'power';
+  if (/watchdog/.test(lower)) return 'watchdog';
+  if (/(queue|queued|publishqueue|inflight)/.test(lower)) return 'queue';
+  if (/(reset|reboot|panic)/.test(lower)) return 'reset';
+  return 'other';
+}
+
+function parseSerialNetworkState(eventType?: string, logLine?: string): string | null {
+  const normalizedEventType = eventType?.toUpperCase();
+  if (normalizedEventType === 'SERIAL_CONNECTED') return 'connected';
+  if (normalizedEventType === 'SERIAL_DISCONNECTED') return 'disconnected';
+  if (normalizedEventType === 'SERIAL_MISSING') return 'missing';
+
+  const lower = logLine?.toLowerCase() || '';
+  if (/(reconnect|retry)/.test(lower)) return 'reconnecting';
+  if (/(disconnect|disconnected)/.test(lower)) return 'disconnected';
+  if (/(connect|connected|cloud connected)/.test(lower)) return 'connected';
+  return null;
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? value.slice(0, maxLength) : value;
 }

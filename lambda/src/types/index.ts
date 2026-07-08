@@ -61,7 +61,7 @@ export interface NormalizedEventFields {
   deviceName?: string;
   collectorId?: string;
   isSyntheticTime: boolean;
-  severity?: EventSeverity;
+  severity?: EventSeverity | null;
   battery?: number;
   connectTime?: number;
   resetCount?: number;
@@ -70,6 +70,12 @@ export interface NormalizedEventFields {
   dailyOccupancy?: number;
   temperature?: number;
   fwVersion?: string;
+  networkState?: string | null;
+  serialCategory?: string | null;
+  serialLogLine?: string;
+  reconnectDetected?: boolean;
+  watchdogDetected?: boolean;
+  resetDetected?: boolean;
   rawRef: {
     s3Key: string;
   };
@@ -130,7 +136,7 @@ export interface DynamoIndexRecord {
   plane?: EventPlane;
   eventVersion?: string;
   isSyntheticTime?: boolean;
-  severity?: EventSeverity;
+  severity?: EventSeverity | null;
   battery?: number;
   connectTime?: number;
   resetCount?: number;
@@ -286,4 +292,95 @@ export interface AnomaliesResponse {
   deviceId: string;
   count: number;
   anomalies: HealthAnomaly[];
+}
+
+/**
+ * Phase 3: Fleet current-state types
+ */
+export type DeviceHealthStatus = 'healthy' | 'warning' | 'critical' | 'unknown';
+
+export interface CurrentStateAnomaly {
+  severity: 'low' | 'medium' | 'high';
+  type: string;
+  message: string;
+}
+
+export interface DeviceCurrentState {
+  projectId: string;
+  deviceId: string;
+  deviceName?: string;
+  deviceNameResolvedAt?: string;
+  deviceNameSource?: 'particle-api';
+  lastEventTime: string;
+  lastIngestTime: string;
+  lastEventType: string;
+  lastPlane?: EventPlane;
+  lastSourceType?: string;
+  fwVersion?: string;
+  battery?: number;
+  connectTime?: number;
+  resetCount?: number;
+  alertCount?: number;
+  occupancy?: number;
+  dailyOccupancy?: number;
+  temperature?: number;
+  severity?: EventSeverity | null;
+  networkState?: string | null;
+  serialCategory?: string | null;
+  lastSerialLogLine?: string;
+  recentSerialErrorCount?: number;
+  reconnectDetected?: boolean;
+  watchdogDetected?: boolean;
+  resetDetected?: boolean;
+  healthStatus: DeviceHealthStatus;
+  anomalyCount: number;
+  anomalies?: CurrentStateAnomaly[];
+  offlineCandidate: boolean;
+  updatedAt: string;
+}
+
+export interface FleetSummaryResponse {
+  projectId: string;
+  deviceCount: number;
+  healthy: number;
+  warning: number;
+  critical: number;
+  unknown: number;
+  lowBatteryCount: number;
+  highConnectTimeCount: number;
+  alertingDeviceCount: number;
+  recentSerialErrorCount: number;
+  devices: Array<{
+    deviceId: string;
+    deviceName: string | null;
+  }>;
+  generatedAt: string;
+}
+
+export interface FleetAnomaliesResponse {
+  projectId: string;
+  count: number;
+  devices: Array<{
+    deviceId: string;
+    deviceName: string | null;
+    healthStatus: DeviceHealthStatus;
+    lastEventTime: string;
+    battery?: number;
+    connectTime?: number;
+    anomalies: CurrentStateAnomaly[];
+  }>;
+}
+
+export interface FleetOfflineResponse {
+  projectId: string;
+  thresholdHours: number;
+  count: number;
+  devices: Array<{
+    deviceId: string;
+    deviceName: string | null;
+    lastEventTime: string;
+    lastPlane?: EventPlane;
+    lastEventType: string;
+    offlineCandidate: true;
+  }>;
 }

@@ -10,6 +10,8 @@
 import { InboundEvent, LambdaResponse, ParticleWebhook } from './types';
 import { storeRawEvent } from './storage/s3';
 import { indexEvent } from './storage/dynamo';
+import { getDeviceCurrentState, updateDeviceCurrentState } from './storage/current-state';
+import { resolveParticleDeviceName } from './integrations/particle-api';
 import {
   parseEventBody,
   buildParsedEvent,
@@ -129,6 +131,62 @@ export async function handleIngestion(event: InboundEvent): Promise<LambdaRespon
     parsedData,
     normalized
   );
+
+  const currentStateTableName = process.env.DEVICE_CURRENT_STATE_TABLE_NAME;
+  if (currentStateTableName) {
+    try {
+      const projectId = normalized?.projectId || body.projectId || 'generalized-core-counter';
+      const previousCurrentState = await getDeviceCurrentState(currentStateTableName, projectId, deviceId);
+      const deviceNameResolution = previousCurrentState?.deviceName
+        ? null
+        : await resolveParticleDeviceName(deviceId);
+
+      await updateDeviceCurrentState(
+        currentStateTableName,
+        deviceId,
+        publishedAt,
+        eventName,
+        body,
+        parsed,
+        normalized,
+        {
+          previous: previousCurrentState,
+          deviceNameResolution,
+        }
+      );
+      console.log(
+        'Phase3A DeviceCurrentState update succeeded',
+        JSON.stringify({
+          tableName: currentStateTableName,
+          projectId,
+          deviceId,
+          eventName,
+          eventTime: publishedAt,
+        })
+      );
+    } catch (err) {
+      console.warn(
+        'Phase3A DeviceCurrentState update failed; preserving ingestion',
+        JSON.stringify({
+          tableName: currentStateTableName,
+          projectId: normalized?.projectId || body.projectId || 'generalized-core-counter',
+          deviceId,
+          eventName,
+          eventTime: publishedAt,
+        }),
+        err
+      );
+    }
+  } else {
+    console.warn(
+      'Phase3A DeviceCurrentState update skipped; DEVICE_CURRENT_STATE_TABLE_NAME is not set',
+      JSON.stringify({
+        deviceId,
+        eventName,
+        eventTime: publishedAt,
+      })
+    );
+  }
 
   // ============================================================================
   // Logging and Response (Exact Current Behavior)

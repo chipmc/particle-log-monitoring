@@ -247,8 +247,15 @@ describe('Phase 2 Normalization Functions', () => {
       expect(result).toMatchObject({
         plane: 'serial',
         eventType: 'serial.log',
+        sourceType: 'serial-forwarder',
         severity: 'WARN',
         collectorId: 'pi-001',
+        serialLogLine: '2026-06-26 [WARN] modem reconnect',
+        serialCategory: 'modem',
+        networkState: 'reconnecting',
+        reconnectDetected: true,
+        watchdogDetected: false,
+        resetDetected: false,
       });
     });
 
@@ -281,7 +288,8 @@ describe('Phase 2 Normalization Functions', () => {
         { ...context, eventName: 'SERIAL_CONNECTED' }
       )).toMatchObject({
         plane: 'serial',
-        eventType: 'serial.lifecycle',
+        sourceType: 'serial-forwarder',
+        eventType: 'serial.lifecycle.connected',
       });
     });
 

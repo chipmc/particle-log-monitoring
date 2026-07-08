@@ -11,6 +11,11 @@ import { handleTimelineQuery } from './query/timeline';
 import { handleHealthQuery } from './query/health';
 import { handleSummaryQuery } from './query/summary';
 import { handleAnomaliesQuery } from './query/anomalies';
+import {
+  handleFleetAnomaliesQuery,
+  handleFleetOfflineQuery,
+  handleFleetSummaryQuery,
+} from './query/fleet';
 
 /**
  * Main query route handler
@@ -20,6 +25,9 @@ import { handleAnomaliesQuery } from './query/anomalies';
  * - GET /device/{deviceId}/health
  * - GET /device/{deviceId}/summary
  * - GET /device/{deviceId}/anomalies
+ * - GET /fleet/summary
+ * - GET /fleet/anomalies
+ * - GET /fleet/offline
  * 
  * TODO: Separate authentication model for query endpoints.
  * Currently reuses x-particle-webhook-secret for simplicity.
@@ -86,6 +94,24 @@ export async function handleQuery(event: QueryEvent): Promise<LambdaResponse> {
     // Route: GET /device/{deviceId}/anomalies
     if (path.match(/^\/device\/[^\/]+\/anomalies$/)) {
       const response = await handleAnomaliesQuery(pathParams, queryParams);
+      return successResponse(response);
+    }
+
+    // Route: GET /fleet/summary
+    if (path === '/fleet/summary') {
+      const response = await handleFleetSummaryQuery(queryParams);
+      return successResponse(response);
+    }
+
+    // Route: GET /fleet/anomalies
+    if (path === '/fleet/anomalies') {
+      const response = await handleFleetAnomaliesQuery(queryParams);
+      return successResponse(response);
+    }
+
+    // Route: GET /fleet/offline
+    if (path === '/fleet/offline') {
+      const response = await handleFleetOfflineQuery(queryParams);
       return successResponse(response);
     }
 

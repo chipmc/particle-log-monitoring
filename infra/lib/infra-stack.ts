@@ -37,6 +37,16 @@ export class InfraStack extends cdk.Stack {
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
+    const deviceCurrentStateTable = new dynamodb.Table(this, 'DeviceCurrentStateTable', {
+      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'deviceId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
     // =========================================================================
     // Lambda Function (handles both ingestion and query)
     // =========================================================================
@@ -60,7 +70,10 @@ export class InfraStack extends cdk.Stack {
       environment: {
         RAW_LOGS_BUCKET_NAME: rawLogsBucket.bucketName,
         LOG_EVENTS_TABLE_NAME: logEventsTable.tableName,
-        PARTICLE_WEBHOOK_SECRET: 'REMOVED_PARTICLE_WEBHOOK_SECRET',
+        DEVICE_CURRENT_STATE_TABLE_NAME: deviceCurrentStateTable.tableName,
+        PARTICLE_ACCESS_TOKEN: process.env.PARTICLE_ACCESS_TOKEN || '',
+        PARTICLE_API_BASE_URL: process.env.PARTICLE_API_BASE_URL || 'https://api.particle.io',
+        PARTICLE_WEBHOOK_SECRET: process.env.PARTICLE_WEBHOOK_SECRET || '',
       },
     });
 
@@ -71,6 +84,19 @@ export class InfraStack extends cdk.Stack {
     // Phase 1 + 2A: Ingestion requires S3 write + DynamoDB write
     rawLogsBucket.grantWrite(ingestionFunction);
     logEventsTable.grantWriteData(ingestionFunction);
+
+    ingestionFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:Query',
+      ],
+      resources: [
+        deviceCurrentStateTable.tableArn,
+      ],
+    }));
 
     // Phase 2B: Query API requires DynamoDB Query only (no S3, no Scan)
     // Grant minimal DynamoDB read permissions for per-device queries
@@ -146,6 +172,38 @@ export class InfraStack extends cdk.Stack {
       ),
     });
 
+    // Phase 3A: Fleet Intelligence endpoints backed by DeviceCurrentState
+
+    // GET /fleet/summary
+    httpApi.addRoutes({
+      path: '/fleet/summary',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: new integrations.HttpLambdaIntegration(
+        'FleetSummaryIntegration',
+        ingestionFunction
+      ),
+    });
+
+    // GET /fleet/anomalies
+    httpApi.addRoutes({
+      path: '/fleet/anomalies',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: new integrations.HttpLambdaIntegration(
+        'FleetAnomaliesIntegration',
+        ingestionFunction
+      ),
+    });
+
+    // GET /fleet/offline
+    httpApi.addRoutes({
+      path: '/fleet/offline',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: new integrations.HttpLambdaIntegration(
+        'FleetOfflineIntegration',
+        ingestionFunction
+      ),
+    });
+
     // =========================================================================
     // CloudFormation Outputs
     // =========================================================================
@@ -166,6 +224,10 @@ export class InfraStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'LogEventsTableName', {
       value: logEventsTable.tableName,
+    });
+
+    new cdk.CfnOutput(this, 'DeviceCurrentStateTableName', {
+      value: deviceCurrentStateTable.tableName,
     });
   }
 }
