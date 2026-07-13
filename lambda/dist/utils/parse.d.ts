@@ -2,9 +2,9 @@
  * Parsing utilities for Particle webhook events
  *
  * Phase 1: Extract current parsing logic (exact behavior preservation)
- * Phase 2: Add normalization functions (scaffolded below)
+ * Phase 2A: Add best-effort normalization functions
  */
-import { ParticleWebhook, ParsedEvent } from '../types';
+import { EventSeverity, NormalizedEventFields, ParticleWebhook, ParsedEvent } from '../types';
 /**
  * Parse raw request body into ParticleWebhook object
  * Preserves exact current behavior including error handling
@@ -42,50 +42,25 @@ export declare function buildParsedEvent(body: ParticleWebhook, userAgent?: stri
  */
 export declare function generateS3Key(eventName: string, deviceId: string, publishedAt: string): string;
 /**
- * Normalize raw event into canonical envelope
- *
- * Phase 2 implementation will:
- * - Map eventName -> stable eventType
- * - Add schemaVersion, eventVersion
- * - Classify plane (telemetry|forensic|serial)
- * - Extract enrichment fields (severity, resetCause, etc.)
- *
- * @see docs/contracts/canonical-event-envelope.md
+ * Context already established by the handler before normalization.
  */
-export declare function normalizeEvent(): any;
+export interface NormalizationContext {
+    deviceId: string;
+    eventName: string;
+    eventTime: string;
+    s3Key: string;
+}
 /**
- * Parse severity from event data
- *
- * Phase 2 implementation will extract:
- * INFO | WARN | ERROR | TRACE | null
- *
- * Based on:
- * - Log level prefixes in serial logs
- * - Alert event types
- * - Reset/watchdog events (ERROR)
+ * Normalize an inbound event into the additive fields stored in DynamoDB.
+ * Parsing is deliberately best effort: unknown or malformed payloads still
+ * receive the base envelope fields and are classified as telemetry.event.
  */
-export declare function parseSeverity(): string | null;
+export declare function normalizeEvent(body: ParticleWebhook, parsedData: any, context: NormalizationContext): NormalizedEventFields;
 /**
- * Parse reset cause from watchdog/status events
- *
- * Phase 2 implementation will extract reset reason
- * from Particle system events
+ * Parse serial log severity without rejecting unfamiliar log formats.
  */
+export declare function parseSeverity(logLine?: unknown): EventSeverity | null;
 export declare function parseResetCause(): string | null;
-/**
- * Parse queue depth from status events
- *
- * Phase 2 implementation will extract queue metrics
- * for connectivity diagnostics
- */
-export declare function parseQueueDepth(): number | null;
-/**
- * Parse network state from connectivity events
- *
- * Phase 2 implementation will extract:
- * - Modem state
- * - Signal strength
- * - Connection status
- */
+export declare function parseQueueDepth(logLine?: unknown): number | null;
 export declare function parseNetworkState(): string | null;
 //# sourceMappingURL=parse.d.ts.map

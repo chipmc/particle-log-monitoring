@@ -1,0 +1,1 @@
+{"version":3,"file":"summary.d.ts","sourceRoot":"","sources":["../../src/query/summary.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,OAAO,EAAE,eAAe,EAAqB,MAAM,UAAU,CAAC;AAK9D;;;;;;;;;GASG;AACH,wBAAsB,kBAAkB,CACtC,cAAc,EAAE,MAAM,CAAC,MAAM,EAAE,MAAM,GAAG,SAAS,CAAC,GAAG,SAAS,EAC9D,eAAe,EAAE,MAAM,CAAC,MAAM,EAAE,MAAM,GAAG,SAAS,CAAC,GAAG,SAAS,GAC9D,OAAO,CAAC,eAAe,CAAC,CA8D1B"}

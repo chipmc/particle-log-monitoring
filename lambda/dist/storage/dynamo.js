@@ -2,9 +2,9 @@
 /**
  * DynamoDB operations for event indexing
  *
- * Preserves exact current behavior:
+ * Preserves the Phase 1 index shape and adds Phase 2A normalized fields:
  * - Fast indexed retrieval by deviceId + eventTime
- * - Current schema (no normalization yet)
+ * - Unchanged partition and sort key model
  * - Extended fields from serial forwarder
  */
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -32,8 +32,9 @@ exports.ddb = ddb;
  * @param s3Key - S3 key for raw event
  * @param body - Original webhook body (for extended fields)
  * @param parsedData - Parsed data (for dataType)
+ * @param normalized - Best-effort Phase 2 normalization fields
  */
-async function indexEvent(tableName, deviceId, eventTime, eventName, receivedAt, s3Key, body, parsedData) {
+async function indexEvent(tableName, deviceId, eventTime, eventName, receivedAt, s3Key, body, parsedData, normalized) {
     const item = {
         deviceId,
         eventTime,
@@ -48,8 +49,12 @@ async function indexEvent(tableName, deviceId, eventTime, eventName, receivedAt,
         collectorId: body.collectorId,
         transport: body.transport,
         eventType: body.eventType,
+        sourceEventType: body.eventType,
         deviceName: body.deviceName,
         logLine: body.logLine,
+        // Additive normalized/enriched fields. Canonical eventType intentionally
+        // supersedes the inbound value; sourceEventType retains the raw value.
+        ...normalized,
     };
     await ddb.send(new lib_dynamodb_1.PutCommand({
         TableName: tableName,

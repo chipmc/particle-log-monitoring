@@ -68,6 +68,18 @@ Not committed.
 Not synced.
 Local-only.
 
+The local Particle token rotation utility must generate the replacement token with an explicit one-year lifetime, validate general Particle authentication, and validate access to the target `device-status` Ledger instance before replacing this cache. The cache replacement must be atomic: create a mode-600 temporary file in the destination directory under `umask 077`, then move it over the existing file only after validation succeeds. If token creation, authentication, or Ledger validation fails, preserve the existing cache.
+
+Do not pass old tokens as command-line arguments. Old-token revocation is a separate post-deployment operation and must occur only after the replacement token is deployed through CDK and validated from the deployed Lambda. Rotation reporting must not expose token values, prefixes, hashes, authorization headers, or API response bodies containing credential material.
+
+Safe rotation sequence:
+
+1. Generate and locally validate the replacement Particle token with the external ops utility.
+2. Source the updated local cache in the deployment shell.
+3. Deploy the replacement credential through CDK during an approved deployment window.
+4. Validate the deployed Lambda can authenticate to Particle and read the expected Ledger instance.
+5. Revoke the old token separately after deployed validation succeeds.
+
 ## If A Secret Is Committed
 
 If a secret is committed or otherwise exposed:

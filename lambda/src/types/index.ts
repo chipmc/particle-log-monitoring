@@ -28,6 +28,8 @@ export interface ParticleWebhook {
   data?: string | object;
   coreid?: string;
   deviceId?: string;
+  product_id?: string | number;
+  productId?: string | number;
   published_at?: string;
   timestamp?: string;
   public?: boolean;
@@ -336,6 +338,10 @@ export interface DeviceCurrentState {
   anomalyCount: number;
   anomalies?: CurrentStateAnomaly[];
   offlineCandidate: boolean;
+  deviceStatusLedgerUpdatedAt?: string;
+  deviceStatusLedgerFetchedAt?: string;
+  deviceStatusLedgerSizeBytes?: number;
+  deviceStatusLedgerData?: Record<string, unknown>;
   updatedAt: string;
 }
 

@@ -3,7 +3,7 @@
  * Parsing utilities for Particle webhook events
  *
  * Phase 1: Extract current parsing logic (exact behavior preservation)
- * Phase 2: Add normalization functions (scaffolded below)
+ * Phase 2A: Add best-effort normalization functions
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseEventBody = parseEventBody;
@@ -18,6 +18,7 @@ exports.parseSeverity = parseSeverity;
 exports.parseResetCause = parseResetCause;
 exports.parseQueueDepth = parseQueueDepth;
 exports.parseNetworkState = parseNetworkState;
+const crypto_1 = require("crypto");
 /**
  * Parse raw request body into ParticleWebhook object
  * Preserves exact current behavior including error handling
@@ -99,64 +100,236 @@ function generateS3Key(eventName, deviceId, publishedAt) {
     const safeTimestamp = publishedAt.replace(/[:.]/g, '-');
     return `particle-events/${datePrefix}/${eventName}/${deviceId}/${safeTimestamp}.json`;
 }
-// ============================================================================
-// Phase 2 Functions (Scaffolded - Not Implemented Yet)
-// ============================================================================
 /**
- * Normalize raw event into canonical envelope
- *
- * Phase 2 implementation will:
- * - Map eventName -> stable eventType
- * - Add schemaVersion, eventVersion
- * - Classify plane (telemetry|forensic|serial)
- * - Extract enrichment fields (severity, resetCause, etc.)
- *
- * @see docs/contracts/canonical-event-envelope.md
+ * Normalize an inbound event into the additive fields stored in DynamoDB.
+ * Parsing is deliberately best effort: unknown or malformed payloads still
+ * receive the base envelope fields and are classified as telemetry.event.
  */
-function normalizeEvent( /* params TBD */) {
-    throw new Error('normalizeEvent not implemented - Phase 2');
+function normalizeEvent(body, parsedData, context) {
+    const data = parsePayloadObject(parsedData);
+    const plane = classifyPlane(body, context.eventName);
+    const eventType = classifyEventType(body, context.eventName, plane, data);
+    const serialLogLine = getSerialLogLine(body);
+    const severity = plane === 'serial' ? parseSeverity(serialLogLine) : null;
+    const sourceType = plane === 'serial'
+        ? 'serial-forwarder'
+        : body.sourceType || 'particle-webhook';
+    const normalized = {
+        schemaVersion: '1.0',
+        eventId: createEventId(context),
+        projectId: body.projectId || 'generalized-core-counter',
+        plane,
+        eventType,
+        eventVersion: '1.0',
+        sourceType,
+        isSyntheticTime: !body.published_at && !body.timestamp,
+        rawRef: {
+            s3Key: context.s3Key,
+        },
+    };
+    addString(normalized, 'deviceName', body.deviceName);
+    addString(normalized, 'collectorId', body.collectorId);
+    if (severity)
+        normalized.severity = severity;
+    if (plane === 'serial')
+        addSerialFields(normalized, body, serialLogLine);
+    addNumber(normalized, 'battery', getField(data, body, 'battery'));
+    addNumber(normalized, 'connectTime', getField(data, body, 'connecttime'));
+    addNumber(normalized, 'resetCount', getField(data, body, 'resets'));
+    addNumber(normalized, 'alertCount', getField(data, body, 'alerts'));
+    addNumber(normalized, 'occupancy', getField(data, body, 'occupancy'));
+    addNumber(normalized, 'dailyOccupancy', getField(data, body, 'dailyoccupancy'));
+    addNumber(normalized, 'temperature', getField(data, body, 'temp') ?? getField(data, body, 'temperature'));
+    const fwVersion = getField(data, body, 'fw_version') ?? body.fw_version;
+    if (typeof fwVersion === 'string' && fwVersion.length > 0) {
+        normalized.fwVersion = fwVersion;
+    }
+    else if (typeof fwVersion === 'number' && Number.isFinite(fwVersion)) {
+        normalized.fwVersion = String(fwVersion);
+    }
+    return normalized;
 }
 /**
- * Parse severity from event data
- *
- * Phase 2 implementation will extract:
- * INFO | WARN | ERROR | TRACE | null
- *
- * Based on:
- * - Log level prefixes in serial logs
- * - Alert event types
- * - Reset/watchdog events (ERROR)
+ * Parse serial log severity without rejecting unfamiliar log formats.
  */
-function parseSeverity( /* params TBD */) {
-    throw new Error('parseSeverity not implemented - Phase 2');
+function parseSeverity(logLine) {
+    if (typeof logLine !== 'string')
+        return null;
+    const match = logLine.match(/\b(TRACE|INFO|WARN|ERROR)\b/i);
+    return match ? match[1].toUpperCase() : null;
 }
-/**
- * Parse reset cause from watchdog/status events
- *
- * Phase 2 implementation will extract reset reason
- * from Particle system events
- */
+// Reserved enrichment hooks for later Phase 2 work.
 function parseResetCause( /* params TBD */) {
-    throw new Error('parseResetCause not implemented - Phase 2');
+    return null;
 }
-/**
- * Parse queue depth from status events
- *
- * Phase 2 implementation will extract queue metrics
- * for connectivity diagnostics
- */
-function parseQueueDepth( /* params TBD */) {
-    throw new Error('parseQueueDepth not implemented - Phase 2');
+function parseQueueDepth(logLine) {
+    if (typeof logLine !== 'string')
+        return null;
+    const match = logLine.match(/(?:queue|queued|publishqueue|inflight)[^0-9]*(\d+)/i);
+    if (!match)
+        return null;
+    const value = Number(match[1]);
+    return Number.isFinite(value) ? value : null;
 }
-/**
- * Parse network state from connectivity events
- *
- * Phase 2 implementation will extract:
- * - Modem state
- * - Signal strength
- * - Connection status
- */
 function parseNetworkState( /* params TBD */) {
-    throw new Error('parseNetworkState not implemented - Phase 2');
+    return null;
+}
+function createEventId(context) {
+    return (0, crypto_1.createHash)('sha256')
+        .update([
+        context.deviceId,
+        context.eventName,
+        context.eventTime,
+        context.s3Key,
+    ].join('\u0000'))
+        .digest('hex');
+}
+function classifyPlane(body, eventName) {
+    if (body.sourceType === 'serial-forwarder' || eventName === 'serialLog') {
+        return 'serial';
+    }
+    if (/(watchdog|status|reset|boot|fault)/i.test(eventName)) {
+        return 'forensic';
+    }
+    return 'telemetry';
+}
+function classifyEventType(body, eventName, plane, data) {
+    const name = eventName.toLowerCase();
+    const sourceEventType = body.eventType?.toUpperCase();
+    if (plane === 'serial') {
+        switch (sourceEventType || eventName.toUpperCase()) {
+            case 'LOG':
+                return 'serial.log';
+            case 'SERIAL_CONNECTED':
+                return 'serial.lifecycle.connected';
+            case 'SERIAL_DISCONNECTED':
+                return 'serial.lifecycle.disconnected';
+            case 'SERIAL_MISSING':
+                return 'serial.lifecycle.missing';
+            default:
+                if (name === 'seriallog' && (!sourceEventType || !!body.logLine))
+                    return 'serial.log';
+                return 'serial.event';
+        }
+    }
+    if (name.includes('watchdog'))
+        return 'fault.watchdog';
+    if (name.includes('status'))
+        return 'telemetry.status';
+    const keys = new Set(Object.keys(data || {}).map(key => key.toLowerCase()));
+    if (keys.has('occupancy') || keys.has('dailyoccupancy')) {
+        return 'telemetry.occupancy';
+    }
+    if (['battery', 'connecttime', 'resets', 'alerts', 'temperature', 'temp']
+        .some(key => keys.has(key))) {
+        return 'telemetry.health';
+    }
+    return 'telemetry.event';
+}
+function parsePayloadObject(data) {
+    if (data && typeof data === 'object' && !Array.isArray(data))
+        return data;
+    if (typeof data !== 'string')
+        return null;
+    const decoded = data
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#39;/g, "'");
+    for (const candidate of [decoded, `{${decoded}`, `{${decoded}}`]) {
+        try {
+            const parsed = JSON.parse(candidate);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return parsed;
+            }
+        }
+        catch {
+            // Continue through best-effort candidates.
+        }
+    }
+    return null;
+}
+function getField(data, body, field) {
+    const dataEntry = data
+        ? Object.entries(data).find(([key]) => key.toLowerCase() === field.toLowerCase())
+        : undefined;
+    if (dataEntry)
+        return dataEntry[1];
+    const bodyEntry = Object.entries(body).find(([key]) => key.toLowerCase() === field.toLowerCase());
+    return bodyEntry?.[1];
+}
+function addNumber(target, field, value) {
+    if (value === null || value === undefined || value === '')
+        return;
+    const numberValue = typeof value === 'number' ? value : Number(value);
+    if (Number.isFinite(numberValue))
+        target[field] = numberValue;
+}
+function addString(target, field, value) {
+    if (typeof value === 'string' && value.length > 0)
+        target[field] = value;
+}
+function addSerialFields(normalized, body, serialLogLine) {
+    if (serialLogLine) {
+        addString(normalized, 'serialLogLine', truncate(serialLogLine, 500));
+    }
+    normalized.serialCategory = parseSerialCategory(serialLogLine);
+    const networkState = parseSerialNetworkState(body.eventType, serialLogLine);
+    if (networkState)
+        normalized.networkState = networkState;
+    const lowerLine = serialLogLine?.toLowerCase() || '';
+    normalized.reconnectDetected = /(reconnect|retry)/.test(lowerLine);
+    normalized.watchdogDetected = /watchdog/.test(lowerLine);
+    normalized.resetDetected = /(reset|reboot|panic)/.test(lowerLine);
+    const queueDepth = parseQueueDepth(serialLogLine);
+    if (queueDepth !== null) {
+        normalized.queueDepth = queueDepth;
+    }
+}
+function getSerialLogLine(body) {
+    if (typeof body.logLine === 'string')
+        return body.logLine;
+    if (typeof body.data === 'string' && body.eventType?.toUpperCase() === 'LOG')
+        return body.data;
+    return undefined;
+}
+function parseSerialCategory(logLine) {
+    if (typeof logLine !== 'string' || logLine.length === 0)
+        return null;
+    const lower = logLine.toLowerCase();
+    if (/(modem|ncp|cellular|sim)/.test(lower))
+        return 'modem';
+    if (/(cloud|network|connect|reconnect|disconnect)/.test(lower))
+        return 'network';
+    if (/(battery|power|pmic|vbat|charge)/.test(lower))
+        return 'power';
+    if (/watchdog/.test(lower))
+        return 'watchdog';
+    if (/(queue|queued|publishqueue|inflight)/.test(lower))
+        return 'queue';
+    if (/(reset|reboot|panic)/.test(lower))
+        return 'reset';
+    return 'other';
+}
+function parseSerialNetworkState(eventType, logLine) {
+    const normalizedEventType = eventType?.toUpperCase();
+    if (normalizedEventType === 'SERIAL_CONNECTED')
+        return 'connected';
+    if (normalizedEventType === 'SERIAL_DISCONNECTED')
+        return 'disconnected';
+    if (normalizedEventType === 'SERIAL_MISSING')
+        return 'missing';
+    const lower = logLine?.toLowerCase() || '';
+    if (/(reconnect|retry)/.test(lower))
+        return 'reconnecting';
+    if (/(disconnect|disconnected)/.test(lower))
+        return 'disconnected';
+    if (/(connect|connected|cloud connected)/.test(lower))
+        return 'connected';
+    return null;
+}
+function truncate(value, maxLength) {
+    return value.length > maxLength ? value.slice(0, maxLength) : value;
 }
 //# sourceMappingURL=parse.js.map

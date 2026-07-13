@@ -90,11 +90,12 @@ describe('Particle Ledger client', () => {
     };
     fetchMock.mockResolvedValue(ledgerResponse(ParticleLedgerNames.deviceStatus, 'Device', 'device123', data));
 
-    const result = await createClient().getDeviceStatus('device123');
+    const result = await createClient().getDeviceStatus('12345', 'device123');
 
     expect(result).toMatchObject({
       ok: true,
       ledgerName: ParticleLedgerNames.deviceStatus,
+      productId: '12345',
       scopeValue: 'device123',
       data,
       instance: {
@@ -107,7 +108,7 @@ describe('Particle Ledger client', () => {
       },
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://particle.example.test/v1/ledgers/device-status/instances/device123',
+      'https://particle.example.test/v1/products/12345/ledgers/device-status/instances/device123',
       expect.objectContaining({
         headers: {
           Authorization: 'Bearer particle-token',
@@ -124,11 +125,12 @@ describe('Particle Ledger client', () => {
     };
     fetchMock.mockResolvedValue(ledgerResponse(ParticleLedgerNames.deviceData, 'Device', 'device123', data));
 
-    const result = await createClient().getDeviceData('device123');
+    const result = await createClient().getDeviceData('12345', 'device123');
 
     expect(result).toMatchObject({
       ok: true,
       ledgerName: ParticleLedgerNames.deviceData,
+      productId: '12345',
       scopeValue: 'device123',
       data,
       instance: {
@@ -141,7 +143,7 @@ describe('Particle Ledger client', () => {
       },
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://particle.example.test/v1/ledgers/device-data/instances/device123',
+      'https://particle.example.test/v1/products/12345/ledgers/device-data/instances/device123',
       expect.any(Object)
     );
   });
@@ -149,7 +151,7 @@ describe('Particle Ledger client', () => {
   it.each([401, 403])('should classify HTTP %i as auth failure', async (status) => {
     fetchMock.mockResolvedValue(textResponse(status, '{}'));
 
-    const result = await createClient().getDeviceStatus('device123');
+    const result = await createClient().getDeviceStatus('12345', 'device123');
 
     expectFailure(result, 'auth_failure', false, status);
   });
@@ -157,7 +159,7 @@ describe('Particle Ledger client', () => {
   it('should classify HTTP 404 as a missing ledger', async () => {
     fetchMock.mockResolvedValue(textResponse(404, '{}'));
 
-    const result = await createClient().getDeviceStatus('device123');
+    const result = await createClient().getDeviceStatus('12345', 'device123');
 
     expectFailure(result, 'missing_ledger', false, 404);
   });
@@ -165,7 +167,7 @@ describe('Particle Ledger client', () => {
   it.each([429, 500, 503])('should classify HTTP %i as a retryable service failure', async (status) => {
     fetchMock.mockResolvedValue(textResponse(status, '{}'));
 
-    const result = await createClient().getDeviceStatus('device123');
+    const result = await createClient().getDeviceStatus('12345', 'device123');
 
     expectFailure(result, 'retryable_failure', true, status);
   });
@@ -180,7 +182,7 @@ describe('Particle Ledger client', () => {
       });
     }));
 
-    const resultPromise = createClient(100).getDeviceStatus('device123');
+    const resultPromise = createClient(100).getDeviceStatus('12345', 'device123');
     jest.advanceTimersByTime(100);
 
     await expect(resultPromise).resolves.toMatchObject({
@@ -196,7 +198,7 @@ describe('Particle Ledger client', () => {
   it('should classify connection reset as a retryable network failure', async () => {
     fetchMock.mockRejectedValue(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
 
-    const result = await createClient().getDeviceStatus('device123');
+    const result = await createClient().getDeviceStatus('12345', 'device123');
 
     expectFailure(result, 'network_failure', true);
   });
@@ -204,7 +206,7 @@ describe('Particle Ledger client', () => {
   it('should classify invalid JSON as a malformed response', async () => {
     fetchMock.mockResolvedValue(textResponse(200, '{not-json'));
 
-    const result = await createClient().getDeviceStatus('device123');
+    const result = await createClient().getDeviceStatus('12345', 'device123');
 
     expectFailure(result, 'malformed_json', false);
   });
@@ -212,7 +214,7 @@ describe('Particle Ledger client', () => {
   it('should classify an empty response body as malformed JSON', async () => {
     fetchMock.mockResolvedValue(textResponse(200, ''));
 
-    const result = await createClient().getDeviceStatus('device123');
+    const result = await createClient().getDeviceStatus('12345', 'device123');
 
     expectFailure(result, 'malformed_json', false);
   });
@@ -224,7 +226,7 @@ describe('Particle Ledger client', () => {
       fetchFn: fetchMock as unknown as typeof fetch,
     });
 
-    const result = await client.getDeviceStatus('device123');
+    const result = await client.getDeviceStatus('12345', 'device123');
 
     expectFailure(result, 'auth_failure', false);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -245,9 +247,10 @@ describe('Particle Ledger client', () => {
         { config: { profile: 'default' } }
       ));
 
-    await expect(createClient().getDeviceSettings('device123')).resolves.toMatchObject({
+    await expect(createClient().getDeviceSettings('12345', 'device123')).resolves.toMatchObject({
       ok: true,
       ledgerName: ParticleLedgerNames.deviceSettings,
+      productId: '12345',
       scopeValue: 'device123',
       data: { reporting: { intervalMinutes: 60 } },
       instance: {
@@ -258,6 +261,7 @@ describe('Particle Ledger client', () => {
     await expect(createClient().getProductDefaults('12345')).resolves.toMatchObject({
       ok: true,
       ledgerName: ParticleLedgerNames.productDefault,
+      productId: '12345',
       scopeValue: '12345',
       data: { config: { profile: 'default' } },
       instance: {
@@ -267,12 +271,12 @@ describe('Particle Ledger client', () => {
     });
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      'https://particle.example.test/v1/ledgers/device-settings/instances/device123',
+      'https://particle.example.test/v1/products/12345/ledgers/device-settings/instances/device123',
       expect.any(Object)
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://particle.example.test/v1/ledgers/default-settings/instances/12345',
+      'https://particle.example.test/v1/products/12345/ledgers/default-settings/instances/12345',
       expect.any(Object)
     );
   });

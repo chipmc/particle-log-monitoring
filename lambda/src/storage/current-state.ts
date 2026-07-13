@@ -77,6 +77,61 @@ export async function getDeviceCurrentState(
   return (result.Item as DeviceCurrentState | undefined) || null;
 }
 
+export interface DeviceStatusLedgerSnapshot {
+  updatedAt: string;
+  fetchedAt: string;
+  sizeBytes?: number;
+  data: Record<string, unknown>;
+}
+
+export async function updateDeviceStatusLedgerSnapshot(
+  tableName: string,
+  projectId: string,
+  deviceId: string,
+  snapshot: DeviceStatusLedgerSnapshot
+): Promise<'updated' | 'stale'> {
+  const assignments = [
+    '#ledgerUpdatedAt = :incomingUpdatedAt',
+    '#ledgerFetchedAt = :fetchedAt',
+    '#ledgerData = :ledgerData',
+  ];
+  const names: Record<string, string> = {
+    '#ledgerUpdatedAt': 'deviceStatusLedgerUpdatedAt',
+    '#ledgerFetchedAt': 'deviceStatusLedgerFetchedAt',
+    '#ledgerData': 'deviceStatusLedgerData',
+  };
+  const values: Record<string, unknown> = {
+    ':incomingUpdatedAt': snapshot.updatedAt,
+    ':fetchedAt': snapshot.fetchedAt,
+    ':ledgerData': snapshot.data,
+  };
+
+  if (snapshot.sizeBytes !== undefined) {
+    names['#ledgerSizeBytes'] = 'deviceStatusLedgerSizeBytes';
+    values[':sizeBytes'] = snapshot.sizeBytes;
+    assignments.push('#ledgerSizeBytes = :sizeBytes');
+  }
+
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { projectId, deviceId },
+      UpdateExpression: `SET ${assignments.join(', ')}`,
+      ConditionExpression: 'attribute_not_exists(#ledgerUpdatedAt) OR #ledgerUpdatedAt < :incomingUpdatedAt',
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    }));
+
+    return 'updated';
+  } catch (err) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+      return 'stale';
+    }
+
+    throw err;
+  }
+}
+
 export async function queryDeviceCurrentStates(
   tableName: string,
   projectId: string,

@@ -8,6 +8,7 @@ import {
   determineHealthStatus,
   ddb,
   queryDeviceCurrentStates,
+  updateDeviceStatusLedgerSnapshot,
   updateDeviceCurrentState,
 } from '../../storage/current-state';
 import { normalizeEvent, safeParseData } from '../../utils/parse';
@@ -196,6 +197,59 @@ describe('DeviceCurrentState storage', () => {
       ':deviceNameResolvedAt': '2026-07-01T10:00:00.000Z',
       ':deviceNameSource': 'particle-api',
     });
+  });
+
+  it('should conditionally write a newer device-status Ledger snapshot', async () => {
+    mockDdbSend.mockResolvedValueOnce({});
+
+    await expect(updateDeviceStatusLedgerSnapshot(
+      'current-state-table',
+      'generalized-core-counter',
+      'device123',
+      {
+        updatedAt: '2026-07-13T10:05:00.000Z',
+        fetchedAt: '2026-07-13T10:10:00.000Z',
+        sizeBytes: 256,
+        data: { connection: { state: 'connected' } },
+      }
+    )).resolves.toBe('updated');
+
+    const updateCommand = mockDdbSend.mock.calls[0][0] as UpdateCommand;
+    expect(updateCommand.input).toMatchObject({
+      TableName: 'current-state-table',
+      Key: {
+        projectId: 'generalized-core-counter',
+        deviceId: 'device123',
+      },
+      ConditionExpression: 'attribute_not_exists(#ledgerUpdatedAt) OR #ledgerUpdatedAt < :incomingUpdatedAt',
+      ExpressionAttributeNames: {
+        '#ledgerUpdatedAt': 'deviceStatusLedgerUpdatedAt',
+        '#ledgerFetchedAt': 'deviceStatusLedgerFetchedAt',
+        '#ledgerSizeBytes': 'deviceStatusLedgerSizeBytes',
+        '#ledgerData': 'deviceStatusLedgerData',
+      },
+      ExpressionAttributeValues: {
+        ':incomingUpdatedAt': '2026-07-13T10:05:00.000Z',
+        ':fetchedAt': '2026-07-13T10:10:00.000Z',
+        ':sizeBytes': 256,
+        ':ledgerData': { connection: { state: 'connected' } },
+      },
+    });
+  });
+
+  it('should treat a failed conditional device-status Ledger write as stale', async () => {
+    mockDdbSend.mockRejectedValueOnce(Object.assign(new Error('stale'), { name: 'ConditionalCheckFailedException' }));
+
+    await expect(updateDeviceStatusLedgerSnapshot(
+      'current-state-table',
+      'generalized-core-counter',
+      'device123',
+      {
+        updatedAt: '2026-07-13T10:05:00.000Z',
+        fetchedAt: '2026-07-13T10:10:00.000Z',
+        data: { connection: { state: 'connected' } },
+      }
+    )).resolves.toBe('stale');
   });
 
   it('should update current state from serial event without health metrics', () => {

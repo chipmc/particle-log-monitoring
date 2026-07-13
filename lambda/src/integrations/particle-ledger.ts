@@ -35,6 +35,7 @@ export interface ParticleLedgerInstance<T extends ParticleLedgerJson = ParticleL
 export interface ParticleLedgerSuccess<T extends ParticleLedgerJson = ParticleLedgerJson> {
   ok: true;
   ledgerName: ParticleLedgerName;
+  productId: string;
   scopeValue: string;
   data: T;
   instance: ParticleLedgerInstance<T>;
@@ -43,6 +44,7 @@ export interface ParticleLedgerSuccess<T extends ParticleLedgerJson = ParticleLe
 export interface ParticleLedgerFailure {
   ok: false;
   ledgerName: ParticleLedgerName;
+  productId: string;
   scopeValue: string;
   error: {
     kind: ParticleLedgerErrorKind;
@@ -73,29 +75,38 @@ const DEFAULT_TIMEOUT_MS = 5000;
 export class ParticleLedgerClient {
   constructor(private readonly options: ParticleLedgerClientOptions = {}) {}
 
-  getDeviceStatus<T extends ParticleLedgerJson = ParticleLedgerJson>(deviceId: string): Promise<ParticleLedgerResult<T>> {
-    return this.getLedgerInstance<T>(ParticleLedgerNames.deviceStatus, deviceId);
+  getDeviceStatus<T extends ParticleLedgerJson = ParticleLedgerJson>(productId: string, deviceId: string): Promise<ParticleLedgerResult<T>> {
+    return this.getProductLedgerInstance<T>(ParticleLedgerNames.deviceStatus, productId, deviceId);
   }
 
-  getDeviceData<T extends ParticleLedgerJson = ParticleLedgerJson>(deviceId: string): Promise<ParticleLedgerResult<T>> {
-    return this.getLedgerInstance<T>(ParticleLedgerNames.deviceData, deviceId);
+  getDeviceData<T extends ParticleLedgerJson = ParticleLedgerJson>(productId: string, deviceId: string): Promise<ParticleLedgerResult<T>> {
+    return this.getProductLedgerInstance<T>(ParticleLedgerNames.deviceData, productId, deviceId);
   }
 
-  getDeviceSettings<T extends ParticleLedgerJson = ParticleLedgerJson>(deviceId: string): Promise<ParticleLedgerResult<T>> {
-    return this.getLedgerInstance<T>(ParticleLedgerNames.deviceSettings, deviceId);
+  getDeviceSettings<T extends ParticleLedgerJson = ParticleLedgerJson>(productId: string, deviceId: string): Promise<ParticleLedgerResult<T>> {
+    return this.getProductLedgerInstance<T>(ParticleLedgerNames.deviceSettings, productId, deviceId);
   }
 
   getProductDefaults<T extends ParticleLedgerJson = ParticleLedgerJson>(productId: string): Promise<ParticleLedgerResult<T>> {
-    return this.getLedgerInstance<T>(ParticleLedgerNames.productDefault, productId);
+    return this.getProductLedgerInstance<T>(ParticleLedgerNames.productDefault, productId, productId);
+  }
+
+  getProductLedgerInstance<T extends ParticleLedgerJson = ParticleLedgerJson>(
+    ledgerName: ParticleLedgerName,
+    productId: string,
+    instanceId: string
+  ): Promise<ParticleLedgerResult<T>> {
+    return this.getLedgerInstance<T>(ledgerName, productId, instanceId);
   }
 
   private async getLedgerInstance<T extends ParticleLedgerJson>(
     ledgerName: ParticleLedgerName,
+    productId: string,
     scopeValue: string
   ): Promise<ParticleLedgerResult<T>> {
     const accessToken = this.options.accessToken ?? process.env.PARTICLE_ACCESS_TOKEN;
     if (!accessToken) {
-      return this.failure(ledgerName, scopeValue, 'auth_failure', 'Particle access token is not configured', false);
+      return this.failure(ledgerName, productId, scopeValue, 'auth_failure', 'Particle access token is not configured', false);
     }
 
     const fetchFn = this.options.fetchFn ?? fetch;
@@ -106,7 +117,7 @@ export class ParticleLedgerClient {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetchFn(`${apiBaseUrl}${buildLedgerInstancePath(ledgerName, scopeValue)}`, {
+      const response = await fetchFn(`${apiBaseUrl}${buildLedgerInstancePath(productId, ledgerName, scopeValue)}`, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: 'application/json',
@@ -115,28 +126,29 @@ export class ParticleLedgerClient {
       });
 
       if (!response.ok) {
-        return this.httpFailure(ledgerName, scopeValue, response.status);
+        return this.httpFailure(ledgerName, productId, scopeValue, response.status);
       }
 
       const text = await response.text();
       if (text.trim().length === 0) {
-        return this.failure(ledgerName, scopeValue, 'malformed_json', 'Particle ledger response body was empty', false);
+        return this.failure(ledgerName, productId, scopeValue, 'malformed_json', 'Particle ledger response body was empty', false);
       }
 
       let payload: ParticleLedgerApiResponse<T>;
       try {
         payload = JSON.parse(text) as ParticleLedgerApiResponse<T>;
       } catch {
-        return this.failure(ledgerName, scopeValue, 'malformed_json', 'Particle ledger response body was not valid JSON', false);
+        return this.failure(ledgerName, productId, scopeValue, 'malformed_json', 'Particle ledger response body was not valid JSON', false);
       }
 
       if (!payload.instance || !isRecord(payload.instance.data)) {
-        return this.failure(ledgerName, scopeValue, 'permanent_failure', 'Particle ledger response missing instance data', false);
+        return this.failure(ledgerName, productId, scopeValue, 'permanent_failure', 'Particle ledger response missing instance data', false);
       }
 
       return {
         ok: true,
         ledgerName,
+        productId,
         scopeValue,
         data: payload.instance.data,
         instance: payload.instance,
@@ -145,7 +157,7 @@ export class ParticleLedgerClient {
       const message = isAbortError(err)
         ? 'Particle ledger request timed out'
         : 'Particle ledger request failed before receiving a response';
-      return this.failure(ledgerName, scopeValue, 'network_failure', message, true);
+      return this.failure(ledgerName, productId, scopeValue, 'network_failure', message, true);
     } finally {
       clearTimeout(timeout);
     }
@@ -153,26 +165,28 @@ export class ParticleLedgerClient {
 
   private httpFailure(
     ledgerName: ParticleLedgerName,
+    productId: string,
     scopeValue: string,
     httpStatus: number
   ): ParticleLedgerFailure {
     if (httpStatus === 401 || httpStatus === 403) {
-      return this.failure(ledgerName, scopeValue, 'auth_failure', 'Particle rejected ledger authentication', false, httpStatus);
+      return this.failure(ledgerName, productId, scopeValue, 'auth_failure', 'Particle rejected ledger authentication', false, httpStatus);
     }
 
     if (httpStatus === 404) {
-      return this.failure(ledgerName, scopeValue, 'missing_ledger', 'Particle ledger instance was not found', false, httpStatus);
+      return this.failure(ledgerName, productId, scopeValue, 'missing_ledger', 'Particle ledger instance was not found', false, httpStatus);
     }
 
     if ([408, 429, 500, 502, 503, 504].includes(httpStatus)) {
-      return this.failure(ledgerName, scopeValue, 'retryable_failure', 'Particle ledger service returned a retryable failure', true, httpStatus);
+      return this.failure(ledgerName, productId, scopeValue, 'retryable_failure', 'Particle ledger service returned a retryable failure', true, httpStatus);
     }
 
-    return this.failure(ledgerName, scopeValue, 'permanent_failure', 'Particle ledger service returned a non-retryable failure', false, httpStatus);
+    return this.failure(ledgerName, productId, scopeValue, 'permanent_failure', 'Particle ledger service returned a non-retryable failure', false, httpStatus);
   }
 
   private failure(
     ledgerName: ParticleLedgerName,
+    productId: string,
     scopeValue: string,
     kind: ParticleLedgerErrorKind,
     message: string,
@@ -182,6 +196,7 @@ export class ParticleLedgerClient {
     const result: ParticleLedgerFailure = {
       ok: false,
       ledgerName,
+      productId,
       scopeValue,
       error: {
         kind,
@@ -193,7 +208,7 @@ export class ParticleLedgerClient {
 
     console.warn(
       'Particle ledger request failed',
-      JSON.stringify({ ledgerName, scopeValue, errorKind: kind, httpStatus })
+      JSON.stringify({ ledgerName, productId, scopeValue, errorKind: kind, httpStatus })
     );
 
     return result;
@@ -201,21 +216,24 @@ export class ParticleLedgerClient {
 }
 
 export function getDeviceStatus<T extends ParticleLedgerJson = ParticleLedgerJson>(
+  productId: string,
   deviceId: string
 ): Promise<ParticleLedgerResult<T>> {
-  return new ParticleLedgerClient().getDeviceStatus<T>(deviceId);
+  return new ParticleLedgerClient().getDeviceStatus<T>(productId, deviceId);
 }
 
 export function getDeviceData<T extends ParticleLedgerJson = ParticleLedgerJson>(
+  productId: string,
   deviceId: string
 ): Promise<ParticleLedgerResult<T>> {
-  return new ParticleLedgerClient().getDeviceData<T>(deviceId);
+  return new ParticleLedgerClient().getDeviceData<T>(productId, deviceId);
 }
 
 export function getDeviceSettings<T extends ParticleLedgerJson = ParticleLedgerJson>(
+  productId: string,
   deviceId: string
 ): Promise<ParticleLedgerResult<T>> {
-  return new ParticleLedgerClient().getDeviceSettings<T>(deviceId);
+  return new ParticleLedgerClient().getDeviceSettings<T>(productId, deviceId);
 }
 
 export function getProductDefaults<T extends ParticleLedgerJson = ParticleLedgerJson>(
@@ -224,8 +242,8 @@ export function getProductDefaults<T extends ParticleLedgerJson = ParticleLedger
   return new ParticleLedgerClient().getProductDefaults<T>(productId);
 }
 
-function buildLedgerInstancePath(ledgerName: ParticleLedgerName, scopeValue: string): string {
-  return `/v1/ledgers/${encodeURIComponent(ledgerName)}/instances/${encodeURIComponent(scopeValue)}`;
+function buildLedgerInstancePath(productId: string, ledgerName: ParticleLedgerName, scopeValue: string): string {
+  return `/v1/products/${encodeURIComponent(productId)}/ledgers/${encodeURIComponent(ledgerName)}/instances/${encodeURIComponent(scopeValue)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

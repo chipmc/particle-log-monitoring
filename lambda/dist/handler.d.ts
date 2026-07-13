@@ -1,27 +1,27 @@
 /**
- * Particle Log Ingestion Lambda
+ * Particle Log Monitoring Lambda - Main Handler
  *
- * Main handler for webhook ingestion from:
- * - Particle Product Webhooks
- * - Raspberry Pi Serial Forwarder
+ * Routes requests between ingestion and query handlers:
+ * - POST /particle/log → Ingestion (Phase 1 + 2A)
+ * - GET /device/... → Query API (Phase 2B)
  *
  * Phase 1: Extracted from inline CDK code (exact behavior preservation)
- * Phase 2: Will add normalization and enrichment pipeline
- *
- * Architecture:
- * - Webhook auth via X-Particle-Webhook-Secret header
- * - Raw event immutable storage in S3
- * - Fast indexed retrieval via DynamoDB
+ * Phase 2A: Additive normalization and enrichment pipeline
+ * Phase 2B: Read-only query API for browser/API observability
  */
-import { InboundEvent, LambdaResponse } from './types';
+import { InboundEvent, QueryEvent, LambdaResponse } from './types';
 /**
- * Main Lambda handler
+ * Main Lambda handler - Route dispatcher
  *
- * Preserves exact current behavior:
- * - 401 if webhook secret missing/invalid
- * - 400 if JSON body invalid
- * - 200 on successful storage
- * - Same logging output
+ * Preserves exact ingestion behavior for POST /particle/log.
+ * Adds new GET endpoints for telemetry queries.
+ *
+ * Accepts both:
+ * - InboundEvent (simple POST with body/headers only) - for backward compat
+ * - QueryEvent (HTTP API v2 format) - primary production format
+ *
+ * @param event - API Gateway event (HTTP API v2 or legacy format)
+ * @returns Lambda response
  */
-export declare function handler(event: InboundEvent): Promise<LambdaResponse>;
+export declare function handler(event: InboundEvent | QueryEvent): Promise<LambdaResponse>;
 //# sourceMappingURL=handler.d.ts.map

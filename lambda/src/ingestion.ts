@@ -12,6 +12,7 @@ import { storeRawEvent } from './storage/s3';
 import { indexEvent } from './storage/dynamo';
 import { getDeviceCurrentState, updateDeviceCurrentState } from './storage/current-state';
 import { resolveParticleDeviceName } from './integrations/particle-api';
+import { refreshDeviceStatusLedger } from './ledger-refresh';
 import {
   parseEventBody,
   buildParsedEvent,
@@ -154,6 +155,13 @@ export async function handleIngestion(event: InboundEvent): Promise<LambdaRespon
           deviceNameResolution,
         }
       );
+      await refreshDeviceStatusLedger({
+        tableName: currentStateTableName,
+        projectId,
+        deviceId,
+        body,
+        previous: previousCurrentState,
+      });
       console.log(
         'Phase3A DeviceCurrentState update succeeded',
         JSON.stringify({
