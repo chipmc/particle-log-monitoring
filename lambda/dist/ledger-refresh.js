@@ -10,21 +10,32 @@ const lastRefreshAttemptAtByDeviceId = new Map();
 const inFlightRefreshByDeviceId = new Map();
 async function refreshDeviceStatusLedger(input) {
     if (!isLedgerRefreshEnabled()) {
+        logLedgerRefreshSkipped({ reason: 'disabled' });
         return 'disabled';
     }
     if (!isDeviceAllowListed(input.deviceId)) {
+        logLedgerRefreshSkipped({ reason: 'device_not_allowlisted', deviceId: input.deviceId });
         return 'not_allow_listed';
     }
-    if (!isEventNameEligible(input.body.event || 'unknown')) {
+    const eventName = input.body.event || 'unknown';
+    if (!isEventNameEligible(eventName)) {
+        logLedgerRefreshSkipped({ reason: 'event_not_allowlisted', eventName });
         return 'event_not_eligible';
     }
     const inFlightRefresh = inFlightRefreshByDeviceId.get(input.deviceId);
     if (inFlightRefresh) {
+        logLedgerRefreshSkipped({ reason: 'inflight', deviceId: input.deviceId });
         return inFlightRefresh;
     }
     const nowMs = (input.fetchedAt || new Date()).getTime();
     const lastRefreshAttemptAt = lastRefreshAttemptAtByDeviceId.get(input.deviceId);
-    if (lastRefreshAttemptAt !== undefined && nowMs - lastRefreshAttemptAt < getRefreshMinIntervalMs()) {
+    const minIntervalMs = getRefreshMinIntervalMs();
+    if (lastRefreshAttemptAt !== undefined && nowMs - lastRefreshAttemptAt < minIntervalMs) {
+        logLedgerRefreshSkipped({
+            reason: 'cooldown',
+            deviceId: input.deviceId,
+            remainingSeconds: Math.ceil((minIntervalMs - (nowMs - lastRefreshAttemptAt)) / 1000),
+        });
         return 'refresh_cooldown';
     }
     lastRefreshAttemptAtByDeviceId.set(input.deviceId, nowMs);
@@ -40,6 +51,8 @@ async function refreshDeviceStatusLedger(input) {
     }
 }
 async function executeDeviceStatusLedgerRefresh(input) {
+    const startedAtMs = Date.now();
+    const elapsedMs = () => Math.max(0, Date.now() - startedAtMs);
     try {
         const productId = await resolveProductId(input.body, input.deviceId, input.fetchedAt);
         if (!productId) {
@@ -52,6 +65,7 @@ async function executeDeviceStatusLedgerRefresh(input) {
                 deviceId: input.deviceId,
                 productId,
                 result: 'failed',
+                elapsedMs: elapsedMs(),
                 httpStatus: ledgerResult.error.httpStatus,
                 errorKind: ledgerResult.error.kind,
             });
@@ -62,7 +76,7 @@ async function executeDeviceStatusLedgerRefresh(input) {
             return 'missing_updated_at';
         }
         if (input.previous?.deviceStatusLedgerUpdatedAt && input.previous.deviceStatusLedgerUpdatedAt >= ledgerUpdatedAt) {
-            logLedgerRefresh({ deviceId: input.deviceId, productId, ledgerUpdatedAt, result: 'unchanged' });
+            logLedgerRefresh({ deviceId: input.deviceId, productId, ledgerUpdatedAt, result: 'unchanged', elapsedMs: elapsedMs() });
             return 'stale';
         }
         const updateResult = await (0, current_state_1.updateDeviceStatusLedgerSnapshot)(input.tableName, input.projectId, input.deviceId, {
@@ -76,11 +90,12 @@ async function executeDeviceStatusLedgerRefresh(input) {
             productId,
             ledgerUpdatedAt,
             result: updateResult === 'updated' ? 'updated' : 'unchanged',
+            elapsedMs: elapsedMs(),
         });
         return updateResult;
     }
     catch (err) {
-        logLedgerRefresh({ deviceId: input.deviceId, result: 'failed', errorKind: 'exception' });
+        logLedgerRefresh({ deviceId: input.deviceId, result: 'failed', elapsedMs: elapsedMs(), errorKind: 'exception' });
         return 'not_found_or_failed';
     }
 }
@@ -91,8 +106,17 @@ function logLedgerRefresh(input) {
         ledgerName: particle_ledger_1.ParticleLedgerNames.deviceStatus,
         ...(input.ledgerUpdatedAt && { ledgerUpdatedAt: input.ledgerUpdatedAt }),
         result: input.result,
+        elapsedMs: input.elapsedMs,
         ...(input.httpStatus !== undefined && { httpStatus: input.httpStatus }),
         ...(input.httpStatus === undefined && input.errorKind && { errorKind: input.errorKind }),
+    }));
+}
+function logLedgerRefreshSkipped(input) {
+    console.info('Ledger refresh skipped', JSON.stringify({
+        reason: input.reason,
+        ...(input.deviceId && { deviceId: input.deviceId }),
+        ...(input.eventName && { eventName: input.eventName }),
+        ...(input.remainingSeconds !== undefined && { remainingSeconds: input.remainingSeconds }),
     }));
 }
 function isLedgerRefreshEnabled() {

@@ -105,6 +105,11 @@ function expectNoParticleWork(client: ParticleLedgerClient): void {
   expect(mockUpdateSnapshot).not.toHaveBeenCalled();
 }
 
+function expectSkipLog(expected: Record<string, unknown>): void {
+  expect(infoSpy).toHaveBeenCalledTimes(1);
+  expect(infoSpy).toHaveBeenCalledWith('Ledger refresh skipped', JSON.stringify(expected));
+}
+
 describe('device-status Ledger refresh', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -133,7 +138,7 @@ describe('device-status Ledger refresh', () => {
     await expect(refresh({ body: { event: 'serialLog', coreid: deviceId }, ledgerClient: client })).resolves.toBe('event_not_eligible');
 
     expectNoParticleWork(client);
-    expect(infoSpy).not.toHaveBeenCalled();
+    expectSkipLog({ reason: 'event_not_allowlisted', eventName: 'serialLog' });
   });
 
   it('should refresh for an eligible Ubidots-Sensor-Hook-v1 event', async () => {
@@ -152,7 +157,7 @@ describe('device-status Ledger refresh', () => {
     await expect(refresh({ ledgerClient: client })).resolves.toBe('disabled');
 
     expectNoParticleWork(client);
-    expect(infoSpy).not.toHaveBeenCalled();
+    expectSkipLog({ reason: 'disabled' });
   });
 
   it('should make no API calls for a non-allow-listed device', async () => {
@@ -162,7 +167,7 @@ describe('device-status Ledger refresh', () => {
     await expect(refresh({ ledgerClient: client })).resolves.toBe('not_allow_listed');
 
     expectNoParticleWork(client);
-    expect(infoSpy).not.toHaveBeenCalled();
+    expectSkipLog({ reason: 'device_not_allowlisted', deviceId });
   });
 
   it('should make no event eligible when event-name configuration is empty', async () => {
@@ -172,6 +177,7 @@ describe('device-status Ledger refresh', () => {
     await expect(refresh({ ledgerClient: client })).resolves.toBe('event_not_eligible');
 
     expectNoParticleWork(client);
+    expectSkipLog({ reason: 'event_not_allowlisted', eventName: eligibleEventName });
   });
 
   it('should parse multiple event names with surrounding whitespace', async () => {
@@ -244,7 +250,12 @@ describe('device-status Ledger refresh', () => {
 
     await expect(Promise.all([firstRefresh, secondRefresh])).resolves.toEqual(['updated', 'updated']);
     expect(mockUpdateSnapshot).toHaveBeenCalledTimes(1);
-    expect(infoSpy).toHaveBeenCalledTimes(1);
+    expect(infoSpy).toHaveBeenCalledTimes(2);
+    expect(infoSpy).toHaveBeenNthCalledWith(
+      1,
+      'Ledger refresh skipped',
+      JSON.stringify({ reason: 'inflight', deviceId })
+    );
   });
 
   it('should allow retry after cooldown when a refresh fails', async () => {
@@ -333,7 +344,7 @@ describe('device-status Ledger refresh', () => {
     expect(mockUpdateSnapshot).not.toHaveBeenCalled();
   });
 
-  it('should not emit INFO logs for routine skipped paths', async () => {
+  it('should emit one INFO log for each skipped path', async () => {
     const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
 
     process.env.PARTICLE_LEDGER_REFRESH_ENABLED = 'false';
@@ -346,8 +357,12 @@ describe('device-status Ledger refresh', () => {
     await refresh({ ledgerClient: client, fetchedAt: startTime });
     await refresh({ ledgerClient: client, fetchedAt: insideCooldown });
 
-    expect(infoSpy).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(infoSpy.mock.calls[0][1] as string)).toMatchObject({ result: 'updated' });
+    expect(infoSpy).toHaveBeenCalledTimes(5);
+    expect(infoSpy).toHaveBeenNthCalledWith(1, 'Ledger refresh skipped', JSON.stringify({ reason: 'disabled' }));
+    expect(infoSpy).toHaveBeenNthCalledWith(2, 'Ledger refresh skipped', JSON.stringify({ reason: 'device_not_allowlisted', deviceId }));
+    expect(infoSpy).toHaveBeenNthCalledWith(3, 'Ledger refresh skipped', JSON.stringify({ reason: 'event_not_allowlisted', eventName: 'serialLog' }));
+    expect(JSON.parse(infoSpy.mock.calls[3][1] as string)).toMatchObject({ result: 'updated' });
+    expect(infoSpy).toHaveBeenNthCalledWith(5, 'Ledger refresh skipped', JSON.stringify({ reason: 'cooldown', deviceId, remainingSeconds: 30 }));
   });
 
   it('should emit exactly one structured INFO log for updated, unchanged, and failed paths', async () => {
@@ -360,6 +375,7 @@ describe('device-status Ledger refresh', () => {
       ledgerName: ParticleLedgerNames.deviceStatus,
       ledgerUpdatedAt: '2026-07-13T10:05:00.000Z',
       result: 'updated',
+      elapsedMs: expect.any(Number),
     });
 
     clearDeviceProductIdCacheForTests();
