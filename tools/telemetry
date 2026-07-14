@@ -9,7 +9,9 @@ const DEFAULT_PROJECT_ID = 'generalized-core-counter';
 const DEFAULT_TIMELINE_HOURS = 24;
 const DEFAULT_TIMELINE_LIMIT = 25;
 const DEFAULT_WATCH_INTERVAL_SECONDS = 3;
-const WATCH_TIMELINE_LIMIT = 1000;
+const WATCH_TIMELINE_LIMIT = 200;
+const WATCH_DYNAMO_PAGE_LIMIT = 200;
+const WATCH_DYNAMO_MAX_ROWS = 2000;
 const WATCH_CURSOR_LOOKBACK_MS = 5 * 60 * 1000;
 const WATCH_LINE_MAX_LENGTH = 160;
 const DEVICE_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
@@ -276,6 +278,13 @@ function parseDurationMs(value, option) {
   return Math.max(0, Math.floor(amount * multiplier));
 }
 
+function formatDuration(ms) {
+  if (ms % (60 * 60 * 1000) === 0) return `${ms / (60 * 60 * 1000)}h`;
+  if (ms % (60 * 1000) === 0) return `${ms / (60 * 1000)}m`;
+  if (ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${ms}ms`;
+}
+
 function parseCategorySet(value, option) {
   const categories = new Set(String(value).split(',').map(entry => entry.trim().toUpperCase()).filter(Boolean));
   if (categories.size === 0) fail(`${option} must include at least one category.`);
@@ -451,19 +460,7 @@ async function fetchTimeline(context, deviceId, options) {
 function queryTimelineFromDynamo(context, deviceId, options) {
   const end = options.end ? new Date(options.end) : new Date();
   const start = options.start ? new Date(options.start) : new Date(end.getTime() - options.hours * 60 * 60 * 1000);
-  const page = awsJson(context.options, [
-    'dynamodb', 'query',
-    '--table-name', context.logEventsTableName,
-    '--key-condition-expression', 'deviceId = :deviceId AND eventTime BETWEEN :start AND :end',
-    '--expression-attribute-values', JSON.stringify({
-      ':deviceId': { S: deviceId },
-      ':start': { S: start.toISOString() },
-      ':end': { S: end.toISOString() },
-    }),
-    '--no-scan-index-forward',
-    '--limit', String(options.limit),
-  ]);
-  const records = (page.Items || []).map(unmarshall);
+  const records = queryTimelineRecordsFromDynamo(context, deviceId, start.toISOString(), end.toISOString(), options);
 
   if (records.length === 0 && !options.allowEmpty) fail(`No data found for device: ${deviceId}`);
 
@@ -475,6 +472,44 @@ function queryTimelineFromDynamo(context, deviceId, options) {
     events: records.map(formatTimelineRecord),
     source: 'dynamodb',
   };
+}
+
+function queryTimelineRecordsFromDynamo(context, deviceId, start, end, options) {
+  const records = [];
+  const readAwsJson = context.awsJson || awsJson;
+  const requestedLimit = options.limit || DEFAULT_TIMELINE_LIMIT;
+  const pageLimit = Math.min(requestedLimit, options.pageLimit || WATCH_DYNAMO_PAGE_LIMIT);
+  const maxRows = Math.min(options.maxRows || requestedLimit, WATCH_DYNAMO_MAX_ROWS);
+  let exclusiveStartKey;
+
+  do {
+    const args = [
+      'dynamodb', 'query',
+      '--table-name', context.logEventsTableName,
+      '--key-condition-expression', 'deviceId = :deviceId AND eventTime BETWEEN :start AND :end',
+      '--expression-attribute-values', JSON.stringify({
+        ':deviceId': { S: deviceId },
+        ':start': { S: start },
+        ':end': { S: end },
+      }),
+      '--no-scan-index-forward',
+      '--limit', String(Math.min(pageLimit, requestedLimit - records.length, maxRows - records.length)),
+    ];
+    if (exclusiveStartKey) {
+      args.push('--exclusive-start-key', JSON.stringify(exclusiveStartKey));
+    }
+
+    const page = readAwsJson(context.options, args, {
+      operation: 'dynamodb query timeline',
+      tableName: context.logEventsTableName,
+      deviceId,
+      pagination: true,
+    });
+    records.push(...((page.Items || []).map(unmarshall)));
+    exclusiveStartKey = page.LastEvaluatedKey;
+  } while (exclusiveStartKey && records.length < requestedLimit && records.length < maxRows);
+
+  return records;
 }
 
 function formatTimelineRecord(record) {
@@ -569,9 +604,7 @@ function outputTimeline(device, timeline, json) {
 
 async function startWatch(context, device, options) {
   if (!options.json) {
-    console.log(`Watching ${displayName(device)} (${device.deviceId})`);
-    console.log('Press Ctrl-C to stop.');
-    console.log('');
+    for (const line of getWatchBannerLines(device, options)) console.log(line);
   }
 
   const controller = new AbortController();
@@ -590,6 +623,16 @@ async function startWatch(context, device, options) {
     process.removeListener('SIGINT', onSigint);
     if (!options.json) console.log('\nStopped.');
   }
+}
+
+function getWatchBannerLines(device, options) {
+  const lines = [
+    `Watching ${displayName(device)} (${device.deviceId}) ${options.sinceMs > 0 ? `since ${formatDuration(options.sinceMs)}` : 'from now'}`,
+  ];
+  if (options.sinceMs === 0) lines.push('Use --since <duration> to include recent history.');
+  lines.push('Press Ctrl-C to stop.');
+  lines.push('');
+  return lines;
 }
 
 async function runWatchLoop(context, device, options, deps = {}) {
@@ -632,7 +675,8 @@ async function runWatchLoop(context, device, options, deps = {}) {
 function createWatchState(options, now) {
   const startMs = options.sinceMs > 0 ? now.getTime() - options.sinceMs : now.getTime() - WATCH_CURSOR_LOOKBACK_MS;
   return {
-    initialized: options.sinceMs > 0,
+    initialized: false,
+    includeInitialTimeline: options.sinceMs > 0,
     cursor: null,
     seenEventIds: new Set(),
     timelineStart: new Date(startMs).toISOString(),
@@ -731,10 +775,24 @@ function buildWatchEntries(events, currentState, state, options) {
   const newEvents = collectNewTimelineEvents(events, state);
 
   if (!state.initialized) {
-    for (const event of newEvents) markWatchEventSeen(state, event);
+    if (state.includeInitialTimeline) {
+      for (const event of newEvents) {
+        markWatchEventSeen(state, event);
+        const entry = watchEntryFromEvent(event, options);
+        if (entry && shouldIncludeWatchCategory(entry.category, options)) entries.push(entry);
+      }
+    } else {
+      for (const event of newEvents) markWatchEventSeen(state, event);
+    }
+
+    for (const entry of initialCurrentStateEntries(currentState)) {
+      if (shouldIncludeWatchCategory(entry.category, options)) entries.push(entry);
+    }
+
     state.currentStateSnapshot = snapshotCurrentState(currentState);
     state.initialized = true;
-    return [];
+    entries.sort((left, right) => left.time.localeCompare(right.time) || left.category.localeCompare(right.category));
+    return entries;
   }
 
   for (const event of newEvents) {
@@ -874,6 +932,26 @@ function detectCurrentStateChanges(currentState, previousSnapshot) {
   return entries;
 }
 
+function initialCurrentStateEntries(currentState) {
+  const snapshot = snapshotCurrentState(currentState);
+  const entries = [];
+  if (snapshot.deviceStatusLedgerUpdatedAt) {
+    entries.push({
+      time: snapshot.deviceStatusLedgerUpdatedAt,
+      category: 'RUNTIME',
+      summary: 'device-status snapshot available',
+    });
+  }
+  if (snapshot.deviceDataLedgerUpdatedAt) {
+    entries.push({
+      time: snapshot.deviceDataLedgerUpdatedAt,
+      category: 'DATA',
+      summary: 'device-data snapshot available',
+    });
+  }
+  return entries;
+}
+
 function snapshotCurrentState(currentState) {
   return {
     deviceStatusLedgerUpdatedAt: currentState && currentState.deviceStatusLedgerUpdatedAt,
@@ -968,8 +1046,14 @@ function awsJson(options, args, settings = {}) {
   if (options.awsProfile) awsArgs.push('--profile', options.awsProfile);
   if (options.awsRegion) awsArgs.push('--region', options.awsRegion);
 
-  const result = spawnSync('aws', awsArgs, { encoding: 'utf8' });
+  const result = spawnSync('aws', awsArgs, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   if (result.error && result.error.code === 'ENOENT') fail('AWS CLI was not found. Install/configure awscli before using this tool.');
+  if (result.error && result.error.code === 'ENOBUFS') {
+    failAwsJson(settings, 'output buffering failed');
+  }
+  if (result.error) {
+    failAwsJson(settings, result.error.message || 'subprocess failed');
+  }
   if (result.status !== 0) {
     const stderr = (result.stderr || '').trim();
     if (settings.notFoundMessage && /does not exist|not found|ValidationError/i.test(stderr)) fail(settings.notFoundMessage);
@@ -979,14 +1063,29 @@ function awsJson(options, args, settings = {}) {
     if (/Unable to locate credentials|could not be found|NoCredentials|ExpiredToken|AccessDenied/i.test(stderr)) {
       fail(`AWS credentials unavailable or unauthorized: ${stderr}`);
     }
+    if (settings.operation) {
+      failAwsJson(settings, stderr || 'pagination failed');
+    }
     fail(`AWS CLI command failed: ${stderr || args.join(' ')}`);
   }
 
   try {
     return JSON.parse(result.stdout || '{}');
   } catch {
+    if (settings.operation) failAwsJson(settings, 'invalid JSON response');
     fail(`AWS CLI returned invalid JSON for: aws ${args.join(' ')}`);
   }
+}
+
+function failAwsJson(settings, reason) {
+  const details = [
+    `operation=${settings.operation || 'aws json'}`,
+    ...(settings.tableName ? [`table=${settings.tableName}`] : []),
+    ...(settings.deviceId ? [`deviceId=${settings.deviceId}`] : []),
+    `reason=${reason}`,
+    ...(settings.pagination ? ['pagination=true'] : []),
+  ];
+  fail(`AWS CLI operation failed (${details.join(', ')})`);
 }
 
 function unmarshall(attributeMap) {
@@ -1064,10 +1163,13 @@ module.exports = {
   createWatchState,
   detectCurrentStateChanges,
   enrichDeviceNames,
+  formatDuration,
   formatWatchEntry,
+  getWatchBannerLines,
   isDeviceId,
   loadDeviceInventory,
   parseOptions,
+  queryTimelineFromDynamo,
   resolveDeviceSelector,
   runWatchLoop,
   watchEntryFromEvent,

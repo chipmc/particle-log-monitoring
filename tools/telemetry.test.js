@@ -13,9 +13,12 @@ const {
   createWatchState,
   detectCurrentStateChanges,
   enrichDeviceNames,
+  formatDuration,
   formatWatchEntry,
+  getWatchBannerLines,
   isDeviceId,
   parseOptions,
+  queryTimelineFromDynamo,
   resolveDeviceSelector,
   runWatchLoop,
   watchEntryFromEvent,
@@ -57,6 +60,19 @@ function event(overrides = {}) {
     occupancy: 14,
     battery: 87,
     ...overrides,
+  };
+}
+
+function dynamoItem(overrides = {}) {
+  return {
+    deviceId: { S: overrides.deviceId || 'device123' },
+    eventTime: { S: overrides.eventTime || '2026-07-14T08:00:00.000Z' },
+    eventName: { S: overrides.eventName || 'serialLog' },
+    eventId: { S: overrides.eventId || 'event-1' },
+    s3Key: { S: overrides.s3Key || 's3/event-1' },
+    eventType: { S: overrides.eventType || 'serial.log' },
+    plane: { S: overrides.plane || 'serial' },
+    serialLogLine: { S: overrides.serialLogLine || 'boot' },
   };
 }
 
@@ -156,6 +172,12 @@ test('watch resolves exact device IDs with the shared selector', () => {
   assert.equal(resolveDeviceSelector(devices, 'e00fce68399ee6244a963935').deviceName, 'Boron-Dev-09');
 });
 
+test('name and ID selectors produce identical resolved-device queries', () => {
+  const devices = [{ deviceId: 'e00fce68399ee6244a963935', deviceName: 'Boron-Dev-09' }];
+
+  assert.equal(resolveDeviceSelector(devices, 'Boron-Dev-09').deviceId, resolveDeviceSelector(devices, 'e00fce68399ee6244a963935').deviceId);
+});
+
 test('watch option parsing supports interval, since, filters, json, and raw', () => {
   const options = parseOptions(['--interval', '2.5', '--since', '5m', '--types', 'serial,status', '--exclude', 'event', '--json', '--raw', 'P2-NewCode-Dev']);
 
@@ -178,6 +200,18 @@ test('watch establishes an initial cursor without printing existing events', () 
   assert.deepEqual(entries, []);
   assert.equal(state.cursor.eventTime, '2026-07-14T08:00:02.000Z');
   assert.equal(state.cursor.id, 'b');
+});
+
+test('default startup prints no historical Timeline rows but emits initial runtime context', () => {
+  const state = createWatchState(watchOptions(), new Date('2026-07-14T08:00:10.000Z'));
+  const entries = buildWatchEntries([
+    event({ eventTime: '2026-07-14T08:00:01.000Z', eventId: 'serial', s3Key: 'serial', eventName: 'serialLog', serialLogLine: 'boot' }),
+  ], { deviceStatusLedgerUpdatedAt: '2026-07-14T08:00:02.000Z' }, state, watchOptions());
+
+  assert.deepEqual(entries.map(entry => [entry.category, entry.summary]), [
+    ['RUNTIME', 'device-status snapshot available'],
+  ]);
+  assert.equal(state.cursor.id, 'serial');
 });
 
 test('watch returns new events only and suppresses duplicates', () => {
@@ -213,6 +247,30 @@ test('watch emits timeline events oldest first', () => {
   ], null, state, watchOptions({ sinceMs: 60000 }));
 
   assert.deepEqual(entries.map(entry => entry.event.eventId), ['a', 'b', 'c']);
+});
+
+test('--since prints first-poll serial rows oldest-first', () => {
+  const options = watchOptions({ sinceMs: 60000 });
+  const state = createWatchState(options, new Date('2026-07-14T08:00:10.000Z'));
+  const entries = buildWatchEntries([
+    event({ eventTime: '2026-07-14T08:00:02.000Z', eventId: '2', s3Key: '2', eventName: 'serialLog', serialLogLine: 'second' }),
+    event({ eventTime: '2026-07-14T08:00:01.000Z', eventId: '1', s3Key: '1', eventName: 'serialLog', serialLogLine: 'first' }),
+  ], null, state, options);
+
+  assert.deepEqual(entries.map(entry => entry.summary), ['first', 'second']);
+});
+
+test('cursor prevents duplicates after initial history', () => {
+  const options = watchOptions({ sinceMs: 60000 });
+  const state = createWatchState(options, new Date('2026-07-14T08:00:10.000Z'));
+  buildWatchEntries([
+    event({ eventTime: '2026-07-14T08:00:01.000Z', eventId: '1', s3Key: '1', eventName: 'serialLog', serialLogLine: 'first' }),
+  ], null, state, options);
+  const entries = buildWatchEntries([
+    event({ eventTime: '2026-07-14T08:00:01.000Z', eventId: '1', s3Key: '1', eventName: 'serialLog', serialLogLine: 'first' }),
+  ], null, state, options);
+
+  assert.deepEqual(entries, []);
 });
 
 test('watch formats serialLog lines and truncates by default', () => {
@@ -261,6 +319,24 @@ test('watch detects current-state snapshot timestamp changes', () => {
     ['RUNTIME', 'device-status snapshot updated'],
     ['DATA', 'device-data snapshot updated'],
   ]);
+});
+
+test('initial RUNTIME snapshot is emitted once', () => {
+  const state = createWatchState(watchOptions(), new Date('2026-07-14T08:00:10.000Z'));
+  const first = buildWatchEntries([], { deviceStatusLedgerUpdatedAt: '2026-07-14T08:00:30.104Z' }, state, watchOptions());
+  const second = buildWatchEntries([], { deviceStatusLedgerUpdatedAt: '2026-07-14T08:00:30.104Z' }, state, watchOptions());
+
+  assert.deepEqual(first.map(entry => [entry.category, entry.summary]), [['RUNTIME', 'device-status snapshot available']]);
+  assert.deepEqual(second, []);
+});
+
+test('initial DATA snapshot is emitted once', () => {
+  const state = createWatchState(watchOptions(), new Date('2026-07-14T08:00:10.000Z'));
+  const first = buildWatchEntries([], { deviceDataLedgerUpdatedAt: '2026-07-14T08:00:30.105Z' }, state, watchOptions());
+  const second = buildWatchEntries([], { deviceDataLedgerUpdatedAt: '2026-07-14T08:00:30.105Z' }, state, watchOptions());
+
+  assert.deepEqual(first.map(entry => [entry.category, entry.summary]), [['DATA', 'device-data snapshot available']]);
+  assert.deepEqual(second, []);
 });
 
 test('device-status Ledger changes classify as runtime', () => {
@@ -361,4 +437,86 @@ test('watch exits cleanly when aborted during sleep', async () => {
   });
 
   assert.equal(sleeps, 1);
+});
+
+test('startup banner explains --since for default from-now mode', () => {
+  const lines = getWatchBannerLines({ deviceId: 'device123', deviceName: 'P2-NewCode-Dev' }, watchOptions());
+
+  assert.deepEqual(lines.slice(0, 3), [
+    'Watching P2-NewCode-Dev (device123) from now',
+    'Use --since <duration> to include recent history.',
+    'Press Ctrl-C to stop.',
+  ]);
+  assert.equal(formatDuration(300000), '5m');
+});
+
+test('Dynamo fallback paginates across multiple pages', () => {
+  const calls = [];
+  const context = {
+    options: {},
+    logEventsTableName: 'events-table',
+    awsJson: (_options, args, settings) => {
+      calls.push({ args, settings });
+      if (calls.length === 1) {
+        return {
+          Items: [dynamoItem({ eventId: 'newer', s3Key: 'newer', eventTime: '2026-07-14T08:00:02.000Z' })],
+          LastEvaluatedKey: { deviceId: { S: 'device123' }, eventTime: { S: '2026-07-14T08:00:02.000Z' } },
+        };
+      }
+      return { Items: [dynamoItem({ eventId: 'older', s3Key: 'older', eventTime: '2026-07-14T08:00:01.000Z' })] };
+    },
+  };
+
+  const timeline = queryTimelineFromDynamo(context, 'device123', {
+    start: '2026-07-14T08:00:00.000Z',
+    end: '2026-07-14T08:00:03.000Z',
+    limit: 2,
+    pageLimit: 1,
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(timeline.events.map(item => item.eventId), ['newer', 'older']);
+  assert.equal(calls[0].settings.operation, 'dynamodb query timeline');
+  assert.equal(calls[0].settings.tableName, 'events-table');
+  assert.equal(calls[0].settings.deviceId, 'device123');
+});
+
+test('Dynamo fallback uses bounded page sizes for large result sets', () => {
+  const limits = [];
+  const context = {
+    options: {},
+    logEventsTableName: 'events-table',
+    awsJson: (_options, args) => {
+      limits.push(Number(args[args.indexOf('--limit') + 1]));
+      return {
+        Items: Array.from({ length: limits[limits.length - 1] }, (_, index) => dynamoItem({ eventId: `event-${limits.length}-${index}`, s3Key: `s3/${limits.length}/${index}` })),
+        ...(limits.length < 3 && { LastEvaluatedKey: { deviceId: { S: 'device123' }, eventTime: { S: String(limits.length) } } }),
+      };
+    },
+  };
+
+  const timeline = queryTimelineFromDynamo(context, 'device123', {
+    start: '2026-07-14T08:00:00.000Z',
+    end: '2026-07-14T08:00:03.000Z',
+    limit: 450,
+  });
+
+  assert.deepEqual(limits, [200, 200, 50]);
+  assert.equal(timeline.events.length, 450);
+});
+
+test('Dynamo fallback treats empty quiet polls as valid when allowed', () => {
+  const timeline = queryTimelineFromDynamo({
+    options: {},
+    logEventsTableName: 'events-table',
+    awsJson: () => ({ Items: [] }),
+  }, 'device123', {
+    start: '2026-07-14T08:00:00.000Z',
+    end: '2026-07-14T08:00:03.000Z',
+    limit: 10,
+    allowEmpty: true,
+  });
+
+  assert.equal(timeline.count, 0);
+  assert.deepEqual(timeline.events, []);
 });
