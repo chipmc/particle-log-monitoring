@@ -2,21 +2,28 @@
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
 const {
   TransientWatchError,
+  buildFleetSummary,
   buildWatchEntries,
   classifyTimelineEvent,
   collectNewTimelineEvents,
   createWatchState,
   detectCurrentStateChanges,
   enrichDeviceNames,
+  fleetSummaryJson,
   formatDuration,
   formatWatchEntry,
   getWatchBannerLines,
   isDeviceId,
+  loadDeviceInventory,
+  loadLocalOperatorConfig,
+  parseEnvFile,
   parseOptions,
   queryTimelineFromDynamo,
   resolveDeviceSelector,
@@ -105,6 +112,17 @@ test('command help exits successfully without external configuration', () => {
   assert.doesNotMatch(result.stderr, /AWS|region|credentials/i);
 });
 
+test('fleet help exits successfully without external configuration', () => {
+  for (const args of [['fleet', '--help'], ['help', 'fleet']]) {
+    const result = runTelemetry(args);
+
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /fleet-summary\.v1/);
+    assert.match(result.stdout, /--product-id <id>/);
+    assert.doesNotMatch(result.stderr, /AWS|region|credentials/i);
+  }
+});
+
 test('unknown commands fail before external configuration is loaded', () => {
   const result = runTelemetry(['frobnicate']);
 
@@ -188,6 +206,180 @@ test('watch option parsing supports interval, since, filters, json, and raw', ()
   assert.equal(options.json, true);
   assert.equal(options.raw, true);
   assert.deepEqual(options.positionals, ['P2-NewCode-Dev']);
+});
+
+test('fleet option parsing supports product id and verbose', () => {
+  const options = parseOptions(['--product-id', '42131', '--verbose', '--json']);
+
+  assert.equal(options.productId, '42131');
+  assert.equal(options.verbose, true);
+  assert.equal(options.json, true);
+});
+
+test('local operator config prefers environment token over secrets file', () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telemetry-home-'));
+  fs.mkdirSync(path.join(homeDir, '.particle-log-monitoring'), { recursive: true });
+  fs.writeFileSync(path.join(homeDir, '.particle-log-monitoring', 'secrets.env'), [
+    'PARTICLE_ACCESS_TOKEN=file-token',
+    'PARTICLE_WEBHOOK_SECRET=file-webhook-secret',
+    'PARTICLE_API_BASE_URL=https://particle.file.test',
+  ].join('\n'));
+
+  const config = loadLocalOperatorConfig({
+    PARTICLE_ACCESS_TOKEN: 'env-token',
+  }, homeDir);
+
+  assert.deepEqual(config, {
+    PARTICLE_ACCESS_TOKEN: 'env-token',
+    PARTICLE_WEBHOOK_SECRET: 'file-webhook-secret',
+    PARTICLE_API_BASE_URL: 'https://particle.file.test',
+  });
+});
+
+test('secrets env parser supports export and quoted values', () => {
+  assert.deepEqual(parseEnvFile(`
+# local operator cache
+export PARTICLE_ACCESS_TOKEN="file-token"
+PARTICLE_WEBHOOK_SECRET='webhook-secret'
+PARTICLE_API_BASE_URL=https://particle.example.test
+`), {
+    PARTICLE_ACCESS_TOKEN: 'file-token',
+    PARTICLE_WEBHOOK_SECRET: 'webhook-secret',
+    PARTICLE_API_BASE_URL: 'https://particle.example.test',
+  });
+});
+
+test('fleet inventory missing token reports local credential guidance', async () => {
+  await assert.rejects(
+    () => loadDeviceInventory({
+      options: { projectId: 'generalized-core-counter' },
+      deviceCurrentStateTableName: 'current-state-table',
+      particleAccessToken: '',
+      particleApiBaseUrl: 'https://particle.example.test',
+      nameCache: new Map(),
+      awsJson: () => ({ Items: [] }),
+    }, { productId: '42131' }),
+    (err) => {
+      assert.match(err.message, /local PARTICLE_ACCESS_TOKEN/);
+      assert.match(err.message, /secrets\.env/);
+      assert.doesNotMatch(err.message, /deployed Lambda|token-/i);
+      return true;
+    }
+  );
+});
+
+test('fleet summary joins product inventory, current state, and runtime projection', () => {
+  const summary = buildFleetSummary([
+    {
+      projectId: 'generalized-core-counter',
+      deviceId: 'device-a',
+      deviceName: 'Counter A',
+      productId: '42131',
+      hasProductInventory: true,
+      hasCurrentState: true,
+      fwVersion: '14',
+      lastEventTime: '2026-07-14T08:00:00.000Z',
+      lastEventType: 'telemetry.occupancy',
+      deviceStatusLedgerUpdatedAt: '2026-07-14T08:01:00.000Z',
+      deviceStatusLedgerData: { connection: { state: 'connected' } },
+      deviceDataLedgerUpdatedAt: '2026-07-14T08:01:30.000Z',
+      particle: { connected: true, system_firmware_version: '5.8.0', last_heard: '2026-07-14T08:02:00.000Z' },
+    },
+    {
+      deviceId: 'device-b',
+      deviceName: 'Counter B',
+      productId: '42131',
+      hasProductInventory: true,
+      hasCurrentState: false,
+      particle: { connected: false, system_firmware_version: '5.7.0' },
+    },
+  ], { productId: '42131', generatedAt: '2026-07-14T08:03:00.000Z' });
+
+  assert.equal(summary.schema, 'fleet-summary.v1');
+  assert.deepEqual(summary.coverage, {
+    inventory: 2,
+    currentState: 1,
+    runtimeStatus: 1,
+    deviceData: 1,
+  });
+  assert.deepEqual(summary.connected, { connected: 1, disconnected: 1, unknown: 0 });
+  assert.deepEqual(summary.distributions.firmware, [
+    { value: '14', count: 1 },
+    { value: '<unknown>', count: 1 },
+  ]);
+  assert.deepEqual(summary.distributions.deviceOs, [
+    { value: '5.7.0', count: 1 },
+    { value: '5.8.0', count: 1 },
+  ]);
+  assert.equal(summary.devices[0].runtimeConnectionState, 'connected');
+});
+
+test('fleet summary JSON omits verbose metadata by default', () => {
+  const summary = buildFleetSummary([
+    {
+      projectId: 'generalized-core-counter',
+      deviceId: 'device-a',
+      deviceName: 'Counter A',
+      hasProductInventory: true,
+      hasCurrentState: true,
+      lastEventType: 'telemetry.occupancy',
+      particle: { connected: true },
+    },
+  ], { productId: '42131', generatedAt: '2026-07-14T08:03:00.000Z' });
+
+  assert.equal(fleetSummaryJson(summary, { verbose: false }).devices[0].metadata, undefined);
+  assert.deepEqual(fleetSummaryJson(summary, { verbose: false }).coverage, {
+    inventory: 1,
+    currentState: 1,
+    runtimeStatus: 0,
+    deviceData: 0,
+  });
+  assert.equal(fleetSummaryJson(summary, { verbose: true }).devices[0].metadata.lastEventType, 'telemetry.occupancy');
+});
+
+test('fleet inventory uses product inventory names without duplicate device lookups', async () => {
+  const originalFetch = global.fetch;
+  const fetchUrls = [];
+  global.fetch = async (url) => {
+    fetchUrls.push(String(url));
+    assert.match(String(url), /\/v1\/products\/42131\/devices/);
+    return {
+      ok: true,
+      json: async () => ({
+        devices: [
+          { id: 'device-a', name: 'Counter A', connected: true, system_firmware_version: '5.8.0' },
+          { id: 'device-b', name: 'Counter B', connected: false, system_firmware_version: '5.7.0' },
+        ],
+      }),
+    };
+  };
+
+  try {
+    const devices = await loadDeviceInventory({
+      options: { projectId: 'generalized-core-counter' },
+      deviceCurrentStateTableName: 'current-state-table',
+      particleAccessToken: 'test-token',
+      particleApiBaseUrl: 'https://particle.example.test',
+      nameCache: new Map(),
+      awsJson: () => ({
+        Items: [{
+          projectId: { S: 'generalized-core-counter' },
+          deviceId: { S: 'device-a' },
+          fwVersion: { S: '14' },
+          lastEventTime: { S: '2026-07-14T08:00:00.000Z' },
+          deviceStatusLedgerUpdatedAt: { S: '2026-07-14T08:01:00.000Z' },
+          deviceStatusLedgerData: { M: { connection: { M: { state: { S: 'connected' } } } } },
+        }],
+      }),
+    }, { productId: '42131' });
+
+    assert.equal(fetchUrls.length, 1);
+    assert.deepEqual(devices.map(device => device.deviceName), ['Counter A', 'Counter B']);
+    assert.equal(devices[0].hasCurrentState, true);
+    assert.equal(devices[1].hasCurrentState, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test('watch establishes an initial cursor without printing existing events', () => {

@@ -2,10 +2,14 @@
 'use strict';
 
 const { spawnSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const { URLSearchParams } = require('url');
 
 const DEFAULT_STACK_NAME = 'InfraStack';
 const DEFAULT_PROJECT_ID = 'generalized-core-counter';
+const DEFAULT_FLEET_PRODUCT_ID = '42131';
+const LOCAL_SECRETS_RELATIVE_PATH = '.particle-log-monitoring/secrets.env';
 const DEFAULT_TIMELINE_HOURS = 24;
 const DEFAULT_TIMELINE_LIMIT = 25;
 const DEFAULT_WATCH_INTERVAL_SECONDS = 3;
@@ -15,7 +19,7 @@ const WATCH_DYNAMO_MAX_ROWS = 2000;
 const WATCH_CURSOR_LOOKBACK_MS = 5 * 60 * 1000;
 const WATCH_LINE_MAX_LENGTH = 160;
 const DEVICE_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
-const COMMANDS = new Set(['devices', 'device', 'timeline', 'watch']);
+const COMMANDS = new Set(['devices', 'device', 'timeline', 'watch', 'fleet']);
 
 async function main() {
   const args = process.argv.slice(2);
@@ -54,6 +58,14 @@ async function main() {
       const devices = await loadDeviceInventory(context);
       if (devices.length === 0) fail('No devices found in DeviceCurrentState.');
       outputDevices(devices, options.json);
+      return;
+    }
+
+    if (command === 'fleet') {
+      ensureNoSelector(options.positionals, 'fleet');
+      const devices = await loadDeviceInventory(context, { productId: options.productId });
+      const summary = buildFleetSummary(devices, { productId: options.productId });
+      outputFleetSummary(summary, options);
       return;
     }
 
@@ -97,12 +109,14 @@ function printUsage() {
   ./tools/telemetry --help
   ./tools/telemetry help [command]
   ./tools/telemetry devices [--json]
+  ./tools/telemetry fleet [--product-id ${DEFAULT_FLEET_PRODUCT_ID}] [--json] [--verbose]
   ./tools/telemetry device <name-or-device-id> [--json]
   ./tools/telemetry timeline <name-or-device-id> [--hours 24] [--limit 50] [--json]
   ./tools/telemetry watch <name-or-device-id> [--interval 3] [--since 5m] [--serial-only] [--json]
 
 Commands:
   devices     List devices from DeviceCurrentState
+  fleet       Summarize one Particle product fleet
   device      Show one device current-state record
   timeline    Show recent timeline events for one device
   watch       Tail near-live timeline and current-state updates
@@ -110,9 +124,11 @@ Commands:
 Options:
   --stack <name>       CloudFormation stack name (default: ${DEFAULT_STACK_NAME})
   --project-id <id>    DeviceCurrentState projectId (default: ${DEFAULT_PROJECT_ID})
+  --product-id <id>    Particle product ID for fleet summary (default: ${DEFAULT_FLEET_PRODUCT_ID})
   --profile <name>     AWS CLI profile
   --region <region>    AWS region
   --json               Emit JSON output
+  --verbose            Include additional per-device metadata where supported
   --hours <hours>      Timeline lookback window
   --limit <count>      Timeline max events
   --interval <seconds> Watch polling interval, minimum 1 (default: ${DEFAULT_WATCH_INTERVAL_SECONDS})
@@ -135,6 +151,22 @@ List devices from DeviceCurrentState.
 
 Options:
   --json               Emit JSON output
+  --stack <name>       CloudFormation stack name (default: ${DEFAULT_STACK_NAME})
+  --project-id <id>    DeviceCurrentState projectId (default: ${DEFAULT_PROJECT_ID})
+  --profile <name>     AWS CLI profile
+  --region <region>    AWS region
+`,
+    fleet: `Usage:
+  ./tools/telemetry fleet [--product-id ${DEFAULT_FLEET_PRODUCT_ID}] [--json] [--verbose]
+
+Summarize one Particle product fleet by joining Particle product inventory,
+DeviceCurrentState, and the existing runtime projection. This report does not
+infer health.
+
+Options:
+  --product-id <id>    Particle product ID (default: ${DEFAULT_FLEET_PRODUCT_ID})
+  --json               Emit fleet-summary.v1 JSON output
+  --verbose            Include additional per-device metadata
   --stack <name>       CloudFormation stack name (default: ${DEFAULT_STACK_NAME})
   --project-id <id>    DeviceCurrentState projectId (default: ${DEFAULT_PROJECT_ID})
   --profile <name>     AWS CLI profile
@@ -198,6 +230,8 @@ function parseOptions(args) {
     stackName: process.env.TELEMETRY_STACK_NAME || DEFAULT_STACK_NAME,
     projectId: process.env.TELEMETRY_PROJECT_ID || DEFAULT_PROJECT_ID,
     json: false,
+    verbose: false,
+    productId: process.env.TELEMETRY_PRODUCT_ID || DEFAULT_FLEET_PRODUCT_ID,
     hours: DEFAULT_TIMELINE_HOURS,
     limit: DEFAULT_TIMELINE_LIMIT,
     intervalSeconds: DEFAULT_WATCH_INTERVAL_SECONDS,
@@ -215,10 +249,14 @@ function parseOptions(args) {
     const arg = args[index];
     if (arg === '--json') {
       options.json = true;
+    } else if (arg === '--verbose') {
+      options.verbose = true;
     } else if (arg === '--stack') {
       options.stackName = requireOptionValue(args, ++index, '--stack');
     } else if (arg === '--project-id') {
       options.projectId = requireOptionValue(args, ++index, '--project-id');
+    } else if (arg === '--product-id') {
+      options.productId = requireOptionValue(args, ++index, '--product-id');
     } else if (arg === '--profile') {
       options.awsProfile = requireOptionValue(args, ++index, '--profile');
     } else if (arg === '--region') {
@@ -315,30 +353,63 @@ async function loadContext(options) {
   if (!logEventsTableName) fail('Stack output LogEventsTableName was not found.');
   if (!queryApiBaseUrl) fail('Stack output QueryApiBaseUrl was not found.');
 
-  const resources = awsJson(options, ['cloudformation', 'describe-stack-resources', '--stack-name', options.stackName]);
-  const lambdaResource = (resources.StackResources || []).find(resource => resource.ResourceType === 'AWS::Lambda::Function');
-  if (!lambdaResource || !lambdaResource.PhysicalResourceId) {
-    fail('Could not discover telemetry Lambda function from the CloudFormation stack.');
-  }
-
-  const lambdaConfig = awsJson(options, ['lambda', 'get-function-configuration', '--function-name', lambdaResource.PhysicalResourceId]);
-  const lambdaEnv = (lambdaConfig.Environment && lambdaConfig.Environment.Variables) || {};
+  const localOperatorConfig = loadLocalOperatorConfig();
 
   return {
     options,
     deviceCurrentStateTableName,
     logEventsTableName,
     queryApiBaseUrl: queryApiBaseUrl.replace(/\/+$/, ''),
-    webhookSecret: lambdaEnv.PARTICLE_WEBHOOK_SECRET || '',
-    particleAccessToken: lambdaEnv.PARTICLE_ACCESS_TOKEN || '',
-    particleApiBaseUrl: (lambdaEnv.PARTICLE_API_BASE_URL || 'https://api.particle.io').replace(/\/+$/, ''),
+    webhookSecret: localOperatorConfig.PARTICLE_WEBHOOK_SECRET || '',
+    particleAccessToken: localOperatorConfig.PARTICLE_ACCESS_TOKEN || '',
+    particleApiBaseUrl: (localOperatorConfig.PARTICLE_API_BASE_URL || 'https://api.particle.io').replace(/\/+$/, ''),
     nameCache: new Map(),
   };
+}
+
+function loadLocalOperatorConfig(env = process.env, homeDir = os.homedir()) {
+  const fileConfig = readLocalSecretsEnv(homeDir);
+  return {
+    PARTICLE_ACCESS_TOKEN: stringValue(env.PARTICLE_ACCESS_TOKEN) || stringValue(fileConfig.PARTICLE_ACCESS_TOKEN),
+    PARTICLE_WEBHOOK_SECRET: stringValue(env.PARTICLE_WEBHOOK_SECRET) || stringValue(fileConfig.PARTICLE_WEBHOOK_SECRET),
+    PARTICLE_API_BASE_URL: stringValue(env.PARTICLE_API_BASE_URL) || stringValue(fileConfig.PARTICLE_API_BASE_URL),
+  };
+}
+
+function readLocalSecretsEnv(homeDir) {
+  const filePath = `${homeDir.replace(/\/+$/, '')}/${LOCAL_SECRETS_RELATIVE_PATH}`;
+  if (!fs.existsSync(filePath)) return {};
+
+  try {
+    return parseEnvFile(fs.readFileSync(filePath, 'utf8'));
+  } catch (err) {
+    fail(`Could not read local operator secrets file at ~/${LOCAL_SECRETS_RELATIVE_PATH}: ${err && err.message ? err.message : String(err)}`);
+  }
+}
+
+function parseEnvFile(text) {
+  const values = {};
+  for (const rawLine of String(text).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    values[match[1]] = unquoteEnvValue(match[2].trim());
+  }
+  return values;
+}
+
+function unquoteEnvValue(value) {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 async function loadDevices(context) {
   const devices = [];
   let exclusiveStartKey;
+  const readAwsJson = context.awsJson || awsJson;
 
   do {
     const args = [
@@ -351,7 +422,7 @@ async function loadDevices(context) {
       args.push('--exclusive-start-key', JSON.stringify(exclusiveStartKey));
     }
 
-    const page = awsJson(context.options, args);
+    const page = readAwsJson(context.options, args);
     for (const item of page.Items || []) {
       devices.push(unmarshall(item));
     }
@@ -362,10 +433,102 @@ async function loadDevices(context) {
   return devices;
 }
 
-async function loadDeviceInventory(context) {
+async function loadDeviceInventory(context, inventoryOptions = {}) {
   const devices = await loadDevices(context);
+  if (inventoryOptions.productId) {
+    const productDevices = await loadParticleProductInventory(context, inventoryOptions.productId);
+    const merged = mergeProductInventory(devices, productDevices, inventoryOptions.productId);
+    await enrichDeviceNames(context, merged, { required: false });
+    return merged;
+  }
   await enrichDeviceNames(context, devices, { required: false });
   return devices;
+}
+
+async function loadParticleProductInventory(context, productId) {
+  if (!context.particleAccessToken) {
+    fail(`Fleet summary requires a local PARTICLE_ACCESS_TOKEN to read Particle product inventory. Set PARTICLE_ACCESS_TOKEN in your shell or source ~/${LOCAL_SECRETS_RELATIVE_PATH}.`);
+  }
+
+  const productDevices = [];
+  const perPage = 100;
+  for (let page = 1; page <= 100; page += 1) {
+    const query = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+    const response = await fetch(`${context.particleApiBaseUrl}/v1/products/${encodeURIComponent(productId)}/devices?${query.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${context.particleAccessToken}`,
+        Accept: 'application/json',
+      },
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      fail(`Particle product inventory request failed with HTTP ${response.status}: ${payload.error || payload.message || 'unknown error'}`);
+    }
+
+    const pageDevices = particleDevicesFromPayload(payload);
+    productDevices.push(...pageDevices.map(device => normalizeParticleProductDevice(device, productId)).filter(Boolean));
+
+    if (pageDevices.length < perPage) break;
+    if (hasParticlePaginationMetadata(payload) && !hasNextParticlePage(payload, page)) break;
+  }
+
+  for (const device of productDevices) {
+    if (device.deviceName) context.nameCache.set(device.deviceId, device.deviceName);
+  }
+  return productDevices;
+}
+
+function particleDevicesFromPayload(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.devices)) return payload.devices;
+  if (Array.isArray(payload.data)) return payload.data;
+  return [];
+}
+
+function hasNextParticlePage(payload, page) {
+  const meta = payload.meta || {};
+  if (typeof meta.total_pages === 'number') return page < meta.total_pages;
+  if (typeof payload.total_pages === 'number') return page < payload.total_pages;
+  if (typeof payload.next_page === 'number') return payload.next_page > page;
+  return false;
+}
+
+function hasParticlePaginationMetadata(payload) {
+  const meta = payload.meta || {};
+  return typeof meta.total_pages === 'number' || typeof payload.total_pages === 'number' || typeof payload.next_page === 'number';
+}
+
+function normalizeParticleProductDevice(device, productId) {
+  const deviceId = stringValue(device.id) || stringValue(device.device_id) || stringValue(device.deviceId);
+  if (!deviceId) return null;
+  return {
+    deviceId,
+    deviceName: stringValue(device.name),
+    productId: String(device.product_id || device.productId || productId),
+    particle: device,
+  };
+}
+
+function mergeProductInventory(currentStateDevices, productDevices, productId) {
+  const currentStateById = new Map(currentStateDevices.map(device => [device.deviceId, device]));
+  const merged = [];
+
+  for (const productDevice of productDevices) {
+    const currentState = currentStateById.get(productDevice.deviceId);
+    merged.push({
+      ...(currentState || {}),
+      deviceId: productDevice.deviceId,
+      deviceName: currentState?.deviceName || productDevice.deviceName,
+      productId: productDevice.productId || productId,
+      particle: productDevice.particle,
+      hasProductInventory: true,
+      hasCurrentState: Boolean(currentState),
+    });
+  }
+
+  merged.sort((left, right) => compareIso(right.lastEventTime, left.lastEventTime) || displayName(left).localeCompare(displayName(right)) || left.deviceId.localeCompare(right.deviceId));
+  return merged;
 }
 
 async function enrichDeviceNames(context, devices, { required }) {
@@ -374,7 +537,7 @@ async function enrichDeviceNames(context, devices, { required }) {
 
   if (!context.particleAccessToken) {
     if (required) {
-      fail('Device-name lookup requires PARTICLE_ACCESS_TOKEN in the deployed Lambda environment, but it is missing. Use a full device ID or configure the token.');
+      fail(`Device-name lookup requires a local PARTICLE_ACCESS_TOKEN. Set PARTICLE_ACCESS_TOKEN in your shell, source ~/${LOCAL_SECRETS_RELATIVE_PATH}, or use a full device ID.`);
     }
     return;
   }
@@ -423,7 +586,7 @@ function resolveDeviceSelector(devices, selector, context = undefined) {
   if (partial.length > 1) failAmbiguous(selector, partial);
 
   if (context && devices.some(device => !stringValue(device.deviceName)) && !context.particleAccessToken) {
-    fail('Device-name lookup requires PARTICLE_ACCESS_TOKEN in the deployed Lambda environment, but it is missing. Use a full device ID or configure the token.');
+    fail(`Device-name lookup requires a local PARTICLE_ACCESS_TOKEN. Set PARTICLE_ACCESS_TOKEN in your shell, source ~/${LOCAL_SECRETS_RELATIVE_PATH}, or use a full device ID.`);
   }
 
   fail(`Device selector not found: ${selector}`);
@@ -578,6 +741,191 @@ function outputDevice(device, json) {
   for (const [label, value] of rows) {
     console.log(`${label.padEnd(width)}  ${value}`);
   }
+}
+
+function buildFleetSummary(devices, options = {}) {
+  const summaryDevices = devices.map(buildFleetSummaryDevice);
+  const inventory = summaryDevices.filter(device => device.coverage.productInventory).length;
+  const currentState = summaryDevices.filter(device => device.coverage.currentState).length;
+  const runtimeStatus = summaryDevices.filter(device => device.coverage.runtimeStatus).length;
+  const deviceData = summaryDevices.filter(device => device.coverage.deviceData).length;
+
+  return {
+    schema: 'fleet-summary.v1',
+    generatedAt: options.generatedAt || new Date().toISOString(),
+    productId: String(options.productId || DEFAULT_FLEET_PRODUCT_ID),
+    coverage: {
+      inventory,
+      currentState,
+      runtimeStatus,
+      deviceData,
+    },
+    connected: {
+      connected: summaryDevices.filter(device => device.connected === true).length,
+      disconnected: summaryDevices.filter(device => device.connected === false).length,
+      unknown: summaryDevices.filter(device => device.connected === null).length,
+    },
+    distributions: {
+      firmware: buildDistribution(summaryDevices.map(device => device.firmwareVersion)),
+      deviceOs: buildDistribution(summaryDevices.map(device => device.deviceOsVersion)),
+    },
+    devices: summaryDevices,
+  };
+}
+
+function buildFleetSummaryDevice(device) {
+  const particle = device.particle || {};
+  const runtimeConnectionState = extractRuntimeConnectionState(device);
+  const connected = extractParticleConnected(particle, runtimeConnectionState);
+  const firmwareVersion = extractFirmwareVersion(device);
+  const deviceOsVersion = extractDeviceOsVersion(device);
+
+  return {
+    deviceId: device.deviceId,
+    deviceName: displayName(device),
+    productId: String(device.productId || particle.product_id || particle.productId || ''),
+    connected,
+    firmwareVersion,
+    deviceOsVersion,
+    runtimeConnectionState,
+    lastEventTime: device.lastEventTime || null,
+    lastHeard: stringValue(particle.last_heard) || stringValue(particle.lastHeard) || null,
+    coverage: {
+      productInventory: device.hasProductInventory === true || Boolean(device.particle),
+      currentState: device.hasCurrentState === true || Boolean(device.projectId || device.lastEventTime),
+      runtimeStatus: hasRuntimeStatusProjection(device),
+      deviceData: hasDeviceDataProjection(device),
+    },
+    metadata: {
+      lastEventType: device.lastEventType || null,
+      lastIngestTime: device.lastIngestTime || null,
+      lastPlane: device.lastPlane || null,
+      networkState: device.networkState || null,
+      deviceStatusLedgerUpdatedAt: device.deviceStatusLedgerUpdatedAt || null,
+      deviceStatusLedgerFetchedAt: device.deviceStatusLedgerFetchedAt || null,
+      currentStateUpdatedAt: device.updatedAt || null,
+      particlePlatformId: particle.platform_id ?? particle.platformId ?? null,
+      particleLastIpAddress: particle.last_ip_address || particle.lastIpAddress || null,
+    },
+  };
+}
+
+function extractFirmwareVersion(device) {
+  return stringValue(device.fwVersion) ||
+    stringValue(getNested(device.deviceStatusLedgerData, ['firmware', 'version'])) ||
+    stringValue(getNested(device.deviceStatusLedgerData, ['application', 'version'])) ||
+    null;
+}
+
+function extractDeviceOsVersion(device) {
+  const particle = device.particle || {};
+  return stringValue(particle.system_firmware_version) ||
+    stringValue(particle.systemFirmwareVersion) ||
+    stringValue(particle.firmware_version) ||
+    stringValue(particle.firmwareVersion) ||
+    stringValue(getNested(device.deviceStatusLedgerData, ['system', 'firmwareVersion'])) ||
+    stringValue(getNested(device.deviceStatusLedgerData, ['deviceOS', 'version'])) ||
+    null;
+}
+
+function extractParticleConnected(particle, runtimeConnectionState) {
+  if (typeof particle.connected === 'boolean') return particle.connected;
+  if (String(runtimeConnectionState || '').toLowerCase() === 'connected') return true;
+  if (String(runtimeConnectionState || '').toLowerCase() === 'disconnected') return false;
+  return null;
+}
+
+function extractRuntimeConnectionState(device) {
+  return stringValue(getNested(device.deviceStatusLedgerData, ['connection', 'state'])) || null;
+}
+
+function hasRuntimeStatusProjection(device) {
+  return Boolean(device.deviceStatusLedgerData || device.deviceStatusLedgerUpdatedAt || device.deviceStatusLedgerFetchedAt);
+}
+
+function hasDeviceDataProjection(device) {
+  return Boolean(device.deviceDataLedgerData || device.deviceDataLedgerUpdatedAt || device.deviceDataLedgerFetchedAt);
+}
+
+function buildDistribution(values) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = stringValue(value) || '<unknown>';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((left, right) => {
+      if (left.value === '<unknown>' && right.value !== '<unknown>') return 1;
+      if (right.value === '<unknown>' && left.value !== '<unknown>') return -1;
+      return right.count - left.count || left.value.localeCompare(right.value);
+    });
+}
+
+function outputFleetSummary(summary, options) {
+  if (options.json) {
+    console.log(JSON.stringify(fleetSummaryJson(summary, options), null, 2));
+    return;
+  }
+
+  console.log(`Fleet Summary: Product ${summary.productId}`);
+  console.log(`Schema: ${summary.schema}`);
+  console.log(`Generated: ${summary.generatedAt}`);
+  console.log('');
+  console.log('Coverage:');
+  console.log(`  Inventory:      ${summary.coverage.inventory}`);
+  console.log(`  Current state:  ${summary.coverage.currentState}`);
+  console.log(`  Runtime status: ${summary.coverage.runtimeStatus}`);
+  console.log(`  Device data:    ${summary.coverage.deviceData}`);
+  console.log('');
+  console.log('Connected:');
+  console.log(`  Connected:    ${summary.connected.connected}`);
+  console.log(`  Disconnected: ${summary.connected.disconnected}`);
+  console.log(`  Unknown:      ${summary.connected.unknown}`);
+  console.log('');
+  printDistribution('Firmware distribution', summary.distributions.firmware);
+  printDistribution('Device OS distribution', summary.distributions.deviceOs);
+  console.log('');
+
+  const rows = summary.devices.map(device => fleetSummaryTextRow(device, options));
+  const columns = options.verbose
+    ? ['NAME', 'DEVICE ID', 'CONNECTED', 'FIRMWARE', 'DEVICE OS', 'LAST SEEN', 'RUNTIME', 'LAST HEARD', 'LEDGER UPDATED', 'LAST EVENT']
+    : ['NAME', 'DEVICE ID', 'CONNECTED', 'FIRMWARE', 'DEVICE OS', 'LAST SEEN', 'RUNTIME'];
+  printTable(rows, columns);
+}
+
+function fleetSummaryTextRow(device, options) {
+  const row = {
+    NAME: safe(device.deviceName),
+    'DEVICE ID': safe(device.deviceId),
+    CONNECTED: device.connected === null ? 'unknown' : String(device.connected),
+    FIRMWARE: safe(device.firmwareVersion),
+    'DEVICE OS': safe(device.deviceOsVersion),
+    'LAST SEEN': safeIso(device.lastEventTime),
+    RUNTIME: safe(device.runtimeConnectionState),
+  };
+
+  if (options.verbose) {
+    row['LAST HEARD'] = safeIso(device.lastHeard);
+    row['LEDGER UPDATED'] = safeIso(device.metadata.deviceStatusLedgerUpdatedAt);
+    row['LAST EVENT'] = safe(device.metadata.lastEventType);
+  }
+  return row;
+}
+
+function printDistribution(label, distribution) {
+  console.log(`${label}:`);
+  for (const entry of distribution) {
+    console.log(`  ${entry.value}: ${entry.count}`);
+  }
+}
+
+function fleetSummaryJson(summary, options) {
+  if (options.verbose) return summary;
+  return {
+    ...summary,
+    devices: summary.devices.map(({ metadata, ...device }) => device),
+  };
 }
 
 function outputTimeline(device, timeline, json) {
@@ -1104,6 +1452,15 @@ function unmarshallValue(value) {
   return undefined;
 }
 
+function getNested(value, path) {
+  let current = value;
+  for (const key of path) {
+    if (!current || typeof current !== 'object') return undefined;
+    current = current[key];
+  }
+  return current;
+}
+
 function isDeviceId(value) {
   return DEVICE_ID_PATTERN.test(value);
 }
@@ -1158,6 +1515,7 @@ module.exports = {
   OperatorError,
   TransientWatchError,
   buildWatchEntries,
+  buildFleetSummary,
   classifyTimelineEvent,
   collectNewTimelineEvents,
   createWatchState,
@@ -1165,9 +1523,12 @@ module.exports = {
   enrichDeviceNames,
   formatDuration,
   formatWatchEntry,
+  fleetSummaryJson,
   getWatchBannerLines,
   isDeviceId,
   loadDeviceInventory,
+  loadLocalOperatorConfig,
+  parseEnvFile,
   parseOptions,
   queryTimelineFromDynamo,
   resolveDeviceSelector,

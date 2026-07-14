@@ -13,8 +13,11 @@ Use the deployed telemetry stack without memorizing DynamoDB table names, API Ga
 - Node.js 18 or newer
 - AWS CLI authenticated for the account and region containing `InfraStack`
 - Deployed `InfraStack` with `DeviceCurrentStateTableName` and `QueryApiBaseUrl` outputs
+- `PARTICLE_ACCESS_TOKEN` in the local shell or `~/.particle-log-monitoring/secrets.env` for Particle inventory lookups
 
 If your AWS CLI profile does not have a default region, pass `--region <region>` or set `AWS_REGION`/`AWS_DEFAULT_REGION`.
+
+Particle credentials are local operator credentials. The CLI prefers `PARTICLE_ACCESS_TOKEN` from the current shell and then reads `~/.particle-log-monitoring/secrets.env` if present. It does not use the deployed Lambda environment as the normal Particle credential source and never prints token values.
 
 ### Quick Start
 
@@ -22,6 +25,7 @@ If your AWS CLI profile does not have a default region, pass `--region <region>`
 cd ~/Documents/Maker/AWS/particle-log-monitoring
 
 ./tools/telemetry devices
+./tools/telemetry fleet
 ./tools/telemetry device e00fce68399ee6244a963935
 ./tools/telemetry timeline e00fce68399ee6244a963935 --hours 24
 ./tools/telemetry watch P2-NewCode-Dev
@@ -33,6 +37,7 @@ cd ~/Documents/Maker/AWS/particle-log-monitoring
 ./tools/telemetry --help
 ./tools/telemetry help [command]
 ./tools/telemetry devices
+./tools/telemetry fleet --product-id 42131
 ./tools/telemetry device <name-or-device-id>
 ./tools/telemetry timeline <name-or-device-id> --hours 24 --limit 50
 ./tools/telemetry watch <device-selector>
@@ -41,6 +46,54 @@ cd ~/Documents/Maker/AWS/particle-log-monitoring
 Use `./tools/telemetry <command> --help` or `./tools/telemetry help <command>` for command-specific help. Help commands run locally and do not require AWS authentication or network access.
 
 All data commands support `--json`. Device selectors accept a full Particle device ID, exact device name, or unambiguous partial device name. The tool discovers deployed resources from CloudFormation and uses the existing query API for timeline reads.
+
+### Fleet Summary
+
+```bash
+./tools/telemetry fleet
+./tools/telemetry fleet --product-id 42131
+./tools/telemetry fleet --json
+./tools/telemetry fleet --verbose
+```
+
+`fleet` is the first Fleet Operations summary command. It scopes the report to one Particle product, defaulting to Product `42131`, and joins Particle product inventory, `DeviceCurrentState`, and the existing runtime projection. It does not infer health.
+
+`fleet` requires a local Particle operator token because Product inventory comes from the Particle API. Source the local operator cache before running if the token is not already in your shell:
+
+```bash
+source "${HOME}/.particle-log-monitoring/secrets.env"
+echo "PARTICLE_ACCESS_TOKEN=${PARTICLE_ACCESS_TOKEN:+SET}"
+```
+
+The confirmation command reports only whether a token is set; it does not expose the token.
+
+The text report includes:
+- Fleet header
+- Coverage counts
+- Connected counts
+- Firmware distribution
+- Device OS distribution
+- Device table
+
+Options:
+- `--product-id <id>`: Particle product ID. Default is `42131`.
+- `--json`: Emit stable `fleet-summary.v1` JSON.
+- `--verbose`: Include additional per-device metadata, such as Particle last-heard time, Ledger update time, and last event type.
+
+`fleet --json` uses the same internal Fleet Summary object as the text renderer. `fleet --verbose --json` includes the additional per-device metadata in the JSON device records.
+
+Coverage in `fleet-summary.v1` JSON is reported with stable keys:
+
+```json
+{
+  "coverage": {
+    "inventory": 12,
+    "currentState": 11,
+    "runtimeStatus": 10,
+    "deviceData": 9
+  }
+}
+```
 
 ### Watch Cheat Sheet
 
