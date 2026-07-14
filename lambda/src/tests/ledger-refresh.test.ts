@@ -117,6 +117,7 @@ describe('device-status Ledger refresh', () => {
       ...originalEnv,
       PARTICLE_LEDGER_REFRESH_ENABLED: 'true',
       PARTICLE_LEDGER_REFRESH_DEVICE_IDS: deviceId,
+      PARTICLE_LEDGER_REFRESH_PRODUCT_IDS: '',
       PARTICLE_LEDGER_REFRESH_EVENT_NAMES: eligibleEventName,
       PARTICLE_LEDGER_REFRESH_MIN_INTERVAL_SECONDS: '60',
     };
@@ -149,6 +150,17 @@ describe('device-status Ledger refresh', () => {
     expect(client.getDeviceStatus).toHaveBeenCalledWith(productId, deviceId);
   });
 
+  it('should refresh when the device is explicitly allow-listed and no product list is configured', async () => {
+    process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = deviceId;
+    process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS = '';
+    const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
+
+    await expect(refresh({ ledgerClient: client })).resolves.toBe('updated');
+
+    expect(mockResolveProductId).not.toHaveBeenCalled();
+    expect(client.getDeviceStatus).toHaveBeenCalledWith(productId, deviceId);
+  });
+
   it('should short-circuit before event-name handling and API calls when disabled', async () => {
     process.env.PARTICLE_LEDGER_REFRESH_ENABLED = 'false';
     process.env.PARTICLE_LEDGER_REFRESH_EVENT_NAMES = '';
@@ -162,6 +174,82 @@ describe('device-status Ledger refresh', () => {
 
   it('should make no API calls for a non-allow-listed device', async () => {
     process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = 'other-device';
+    const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
+
+    await expect(refresh({ ledgerClient: client })).resolves.toBe('not_allow_listed');
+
+    expectNoParticleWork(client);
+    expectSkipLog({ reason: 'device_not_allowlisted', deviceId });
+  });
+
+  it('should refresh when the webhook product ID is allow-listed', async () => {
+    process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = '';
+    process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS = productId;
+    const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
+
+    await expect(refresh({ ledgerClient: client })).resolves.toBe('updated');
+
+    expect(mockResolveProductId).not.toHaveBeenCalled();
+    expect(client.getDeviceStatus).toHaveBeenCalledWith(productId, deviceId);
+  });
+
+  it('should make no API calls when neither device nor product is allow-listed', async () => {
+    process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = 'other-device';
+    process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS = '67890';
+    const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
+
+    await expect(refresh({ ledgerClient: client })).resolves.toBe('not_allow_listed');
+
+    expect(mockResolveProductId).not.toHaveBeenCalled();
+    expect(client.getDeviceStatus).not.toHaveBeenCalled();
+    expect(mockUpdateSnapshot).not.toHaveBeenCalled();
+    expectSkipLog({ reason: 'device_not_allowlisted', deviceId });
+  });
+
+  it('should use the cached product-ID resolver when webhook product ID is missing for product eligibility', async () => {
+    process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = '';
+    process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS = '67890';
+    mockResolveProductId.mockResolvedValue({
+      productId: '67890',
+      productIdResolvedAt: '2026-07-13T10:10:00.000Z',
+      productIdSource: 'particle-api',
+    });
+    const client = createClient({ ...successResult('2026-07-13T10:05:00.000Z'), productId: '67890' });
+    const bodyWithoutProductId = { event: eligibleEventName, coreid: deviceId };
+
+    await refresh({ body: bodyWithoutProductId, ledgerClient: client, fetchedAt: startTime });
+    await refresh({ body: bodyWithoutProductId, ledgerClient: client, fetchedAt: afterCooldown });
+
+    expect(mockResolveProductId).toHaveBeenCalledTimes(1);
+    expect(client.getDeviceStatus).toHaveBeenCalledTimes(2);
+    expect(client.getDeviceStatus).toHaveBeenNthCalledWith(1, '67890', deviceId);
+    expect(client.getDeviceStatus).toHaveBeenNthCalledWith(2, '67890', deviceId);
+  });
+
+  it('should perform no product lookup for serialLog even when product eligibility is configured', async () => {
+    process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = '';
+    process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS = productId;
+    const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
+
+    await expect(refresh({ body: { event: 'serialLog', coreid: deviceId }, ledgerClient: client })).resolves.toBe('event_not_eligible');
+
+    expectNoParticleWork(client);
+    expectSkipLog({ reason: 'event_not_allowlisted', eventName: 'serialLog' });
+  });
+
+  it('should parse comma-separated product IDs with surrounding whitespace', async () => {
+    process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = '';
+    process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS = ' 11111 , 12345 , 67890 ';
+    const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
+
+    await expect(refresh({ ledgerClient: client })).resolves.toBe('updated');
+
+    expect(client.getDeviceStatus).toHaveBeenCalledWith(productId, deviceId);
+  });
+
+  it('should treat an empty product list as not product allow-listed', async () => {
+    process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS = '';
+    process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS = ' , , ';
     const client = createClient(successResult('2026-07-13T10:05:00.000Z'));
 
     await expect(refresh({ ledgerClient: client })).resolves.toBe('not_allow_listed');

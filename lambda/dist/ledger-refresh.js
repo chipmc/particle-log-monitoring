@@ -13,14 +13,14 @@ async function refreshDeviceStatusLedger(input) {
         logLedgerRefreshSkipped({ reason: 'disabled' });
         return 'disabled';
     }
-    if (!isDeviceAllowListed(input.deviceId)) {
-        logLedgerRefreshSkipped({ reason: 'device_not_allowlisted', deviceId: input.deviceId });
-        return 'not_allow_listed';
-    }
     const eventName = input.body.event || 'unknown';
     if (!isEventNameEligible(eventName)) {
         logLedgerRefreshSkipped({ reason: 'event_not_allowlisted', eventName });
         return 'event_not_eligible';
+    }
+    if (!isDeviceAllowListed(input.deviceId) && !(await isProductAllowListed(input.body, input.deviceId, input.fetchedAt))) {
+        logLedgerRefreshSkipped({ reason: 'device_not_allowlisted', deviceId: input.deviceId });
+        return 'not_allow_listed';
     }
     const inFlightRefresh = inFlightRefreshByDeviceId.get(input.deviceId);
     if (inFlightRefresh) {
@@ -124,6 +124,13 @@ function isLedgerRefreshEnabled() {
 }
 function isDeviceAllowListed(deviceId) {
     return parseAllowList(process.env.PARTICLE_LEDGER_REFRESH_DEVICE_IDS).has(deviceId);
+}
+async function isProductAllowListed(body, deviceId, resolvedAt) {
+    const productIds = parseAllowList(process.env.PARTICLE_LEDGER_REFRESH_PRODUCT_IDS);
+    if (productIds.size === 0)
+        return false;
+    const productId = await resolveProductId(body, deviceId, resolvedAt);
+    return productId !== null && productIds.has(productId);
 }
 function isEventNameEligible(eventName) {
     return parseAllowList(process.env.PARTICLE_LEDGER_REFRESH_EVENT_NAMES).has(eventName);
