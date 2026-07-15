@@ -13,7 +13,7 @@ fail() {
 
 require_repo_root() {
   if [ ! -f "${REPO_ROOT}/README.md" ] || [ ! -d "${REPO_ROOT}/tools" ] || [ ! -f "${TELEMETRY_SOURCE}" ]; then
-    fail "Run this installer from the particle-log-monitoring repository root."
+    fail "Run this installer from the particle-fleet-operations repository root."
   fi
 
   if [ ! -x "${TELEMETRY_SOURCE}" ]; then

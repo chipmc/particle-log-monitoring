@@ -117,7 +117,7 @@ Standard Workflow
 
 Phase 1 — Repository Investigation
 
-CODEX reviews particle-log-monitoring and local-serial-log-forwarder.
+CODEX reviews particle-fleet-operations and local-serial-log-forwarder.
 
 Phase 2 — Deployed AWS Investigation
 

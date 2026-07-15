@@ -1,6 +1,6 @@
 # Tools Guide
 
-Local inspection and diagnostic tools for particle-log-monitoring.
+Local inspection and diagnostic tools for particle-fleet-operations.
 
 ## Telemetry Operator CLI
 
@@ -22,7 +22,7 @@ Particle credentials are local operator credentials. The CLI prefers `PARTICLE_A
 ### Quick Start
 
 ```bash
-cd ~/Documents/Maker/AWS/particle-log-monitoring
+cd ~/Documents/Maker/AWS/particle-fleet-operations
 
 ./tools/telemetry devices
 ./tools/telemetry fleet
@@ -37,7 +37,7 @@ cd ~/Documents/Maker/AWS/particle-log-monitoring
 Install the operator CLI once from the repository root:
 
 ```bash
-cd ~/Documents/Maker/AWS/particle-log-monitoring
+cd ~/Documents/Maker/AWS/particle-fleet-operations
 ./tools/install
 ```
 

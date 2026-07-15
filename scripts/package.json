@@ -1,7 +1,7 @@
 {
-  "name": "particle-log-monitoring-scripts",
+  "name": "particle-fleet-operations-scripts",
   "version": "1.0.0",
-  "description": "CLI tools for local inspection of particle-log-monitoring data (plain text output)",
+  "description": "CLI tools for local inspection of particle-fleet-operations data (plain text output)",
   "private": true,
   "scripts": {
     "build": "tsc",

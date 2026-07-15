@@ -1,6 +1,6 @@
 # Particle Log Monitoring Scripts
 
-Local CLI tools for inspecting particle-log-monitoring data.
+Local CLI tools for inspecting particle-fleet-operations data.
 
 ## Purpose
 
