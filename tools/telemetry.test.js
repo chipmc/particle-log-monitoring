@@ -7,7 +7,6 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
-  isRoutineSerialLifecycleEvent,
   normalizeSeverity,
   presentEvent,
   presentObservation,
@@ -1202,26 +1201,7 @@ test('fleet summary classifies telemetry, lifecycle, and unknown latest events f
   assert.deepEqual(summary.attention, []);
 });
 
-test('routine serial lifecycle classification covers canonical and legacy identities', () => {
-  for (const eventType of [
-    'serial.lifecycle.connecting',
-    'serial.lifecycle.connected',
-    'serial.lifecycle.disconnected',
-    'serial.lifecycle.missing',
-    'SERIAL_CONNECTING',
-    'SERIAL_CONNECTED',
-    'SERIAL_DISCONNECTED',
-    'SERIAL_MISSING',
-  ]) {
-    assert.equal(isRoutineSerialLifecycleEvent({ eventType }), true, eventType);
-  }
-  assert.equal(isRoutineSerialLifecycleEvent({ sourceEventType: 'SERIAL_MISSING' }), true);
-  assert.equal(isRoutineSerialLifecycleEvent({ eventName: 'SERIAL_CONNECTED' }), true);
-  assert.equal(isRoutineSerialLifecycleEvent({ eventType: 'collector.post.failed' }), false);
-  assert.equal(isRoutineSerialLifecycleEvent({ eventType: 'serial.lifecycle.disconnected', severity: 'ERROR' }), false);
-});
-
-test('fleet Recent Activity omits routine collector lifecycle and fills the limit with meaningful activity', () => {
+test('fleet Recent Activity omits collector rows and fills the limit with meaningful activity', () => {
   const devices = [
     ['connecting', 'serial.lifecycle.connecting', '2026-07-14T11:14:00.000Z'],
     ['connected', 'serial.lifecycle.connected', '2026-07-14T11:13:00.000Z'],
@@ -1272,7 +1252,7 @@ test('fleet Recent Activity omits routine collector lifecycle and fills the limi
   ]);
 });
 
-test('fleet Recent Activity keeps collector failures and detailed timelines keep routine lifecycle events', () => {
+test('fleet Recent Activity omits collector failures while detailed timelines keep collector events', () => {
   const summary = buildFleetSummary([{
     projectId: 'generalized-core-counter',
     deviceId: 'collector-device',
@@ -1294,9 +1274,7 @@ test('fleet Recent Activity keeps collector failures and detailed timelines keep
     })],
   });
 
-  assert.deepEqual(summary.recentActivity.map(entry => [entry.kind, entry.eventType]), [
-    ['COLLECTOR', 'collector.post.failed'],
-  ]);
+  assert.deepEqual(summary.recentActivity, []);
   assert.deepEqual(timeline.presentations.map(entry => [entry.kind, entry.summary]), [
     ['COLLECTOR', 'Serial device disconnected'],
   ]);

@@ -6,7 +6,6 @@ const fs = require('fs');
 const os = require('os');
 const { URLSearchParams } = require('url');
 const {
-  isRoutineSerialLifecycleEvent,
   presentEvent,
   presentObservation,
 } = require('./event-presentation');
@@ -1420,9 +1419,9 @@ function buildFleetRecentActivity(devices, options = {}) {
         sourceType: device.metadata?.lastSourceType,
         severity: device.metadata?.lastSeverity,
       };
-      if (isRoutineSerialLifecycleEvent(event)) return null;
-
       const presentation = presentEvent(event);
+      if (presentation.kind === 'COLLECTOR') return null;
+
       return {
         ...presentation,
         source: 'DeviceCurrentState',
